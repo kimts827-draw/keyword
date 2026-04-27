@@ -51,7 +51,7 @@ def get_base_keywords(seed_keyword):
     return resp.json().get('keywordList', [])
 
 # ==========================================
-# [분석 및 크롤링 로직 (황금 등급 추가)]
+# [분석 및 크롤링 로직 (세분화 및 가짜 황금 격리)]
 # ==========================================
 def fetch_shop_data(item):
     rel_keyword = item['relKeyword']
@@ -82,12 +82,19 @@ def fetch_shop_data(item):
     elif total_vol > 100 and (product_count / total_vol) < 0.1: keyword_type = "블로그용 (낮은 상품비율)"
     else: keyword_type = "쇼핑용"
 
-    grade = "일반"
+    # [업그레이드] 쇼핑 키워드 5단계 세분화 + 브랜드 격리
+    grade = "⚪ 일반 (보통)"
     if keyword_type == "쇼핑용":
-        if total_vol >= 500 and competition <= 1.0:
-            grade = "🥇 황금"
-        elif total_vol >= 300 and competition <= 2.0:
-            grade = "🟢 우수"
+        if total_vol >= 1000 and competition <= 0.05:
+            grade = "🚨 브랜드/오타 의심" # 수치가 비정상적으로 너무 좋은 경우
+        elif total_vol >= 500 and competition <= 0.5:
+            grade = "💎 다이아 (최상급)"
+        elif total_vol >= 300 and competition <= 1.0:
+            grade = "🥇 황금 (상급)"
+        elif total_vol >= 100 and competition <= 3.0:
+            grade = "🟢 틈새 (중급)"
+        elif competition > 10.0:
+            grade = "🔥 레드오션 (포기)"
         
     return {"키워드 등급": grade, "성향": keyword_type, "연관키워드": rel_keyword, "쇼핑 카테고리": category,
             "월 검색량": total_vol, "상품수": product_count, "경쟁률(포화도)": competition, "쇼핑전환기회": conversion}
@@ -101,34 +108,40 @@ def fetch_blog_data(item):
     blog_headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
     
     blog_total = 0
-    # [수정됨] 차단 방어 로직: 에러 시 최대 3번까지 재시도
     for attempt in range(3):
         try:
             blog_resp = requests.get(blog_url, params={"query": rel_keyword, "display": 1}, headers=blog_headers, timeout=5)
-            
             if blog_resp.status_code == 200:
                 blog_total = blog_resp.json().get('total', 0)
-                break  # 성공적으로 데이터를 받아오면 반복문 탈출
+                break
             elif blog_resp.status_code == 429:
-                time.sleep(0.5)  # 너무 빨라서 차단당하면 0.5초 대기 후 재시도
+                time.sleep(0.5)
                 continue
             else:
-                break  # 권한 부족(401, 403) 등 다른 에러면 즉시 중단
+                break
         except:
             time.sleep(0.5)
             continue
-            
+        
     saturation = round(blog_total / total_vol, 2) if total_vol > 0 else 0
     opportunity = round((total_vol / (blog_total + 1)) * 100, 2)
 
-    grade = "일반"
-    if total_vol >= 500 and saturation <= 2.0:
-        grade = "🥇 황금"
-    elif total_vol >= 300 and saturation <= 5.0:
-        grade = "🟢 우수"
+    # [업그레이드] 블로그 키워드 5단계 세분화 + 이슈 키워드 격리
+    grade = "⚪ 일반 (보통)"
+    if total_vol >= 1000 and saturation <= 0.1:
+        grade = "🚨 브랜드/이슈 의심"
+    elif total_vol >= 500 and saturation <= 1.0:
+        grade = "💎 다이아 (최상급)"
+    elif total_vol >= 300 and saturation <= 2.0:
+        grade = "🥇 황금 (상급)"
+    elif total_vol >= 100 and saturation <= 5.0:
+        grade = "🟢 틈새 (중급)"
+    elif saturation > 15.0:
+        grade = "🔥 레드오션 (포기)"
     
     return {"키워드 등급": grade, "연관키워드": rel_keyword, "월간 검색량": total_vol, "블로그 누적 발행량": blog_total,
             "블로그 포화도(경쟁도)": saturation, "노출 기회(블루오션 지수)": opportunity}
+
 
 def analyze_top_blogs(target_keyword, total_vol):
     url = "https://openapi.naver.com/v1/search/blog.json"
@@ -202,9 +215,12 @@ with st.sidebar:
     blacklist = [word.strip() for word in blacklist_input.split(",") if word.strip()]
     st.divider()
     st.markdown("""
-    **🥇 황금 키워드 기준**
-    - **쇼핑:** 검색량 500이상 & 상품수 비율 1.0 이하
-    - **블로그:** 검색량 500이상 & 포화도 2.0 이하
+    **📊 키워드 등급 기준**
+    - 💎 **다이아:** 검색량 500↑ & 경쟁률 0.5↓ (최상)
+    - 🥇 **황금:** 검색량 300↑ & 경쟁률 1.0↓ (상급)
+    - 🟢 **틈새:** 검색량 100↑ & 경쟁률 3.0↓ (중급, 현실적 타점)
+    - 🚨 **의심:** 수치가 비정상적으로 좋음 (상표권 주의)
+    - 🔥 **레드오션:** 경쟁률 10.0 초과 (진입 주의)
     """)
 
 st.title("⚡ 마케팅 통합 키워드 분석기")

@@ -100,11 +100,24 @@ def fetch_blog_data(item):
     blog_url = "https://openapi.naver.com/v1/search/blog.json"
     blog_headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
     
-    try:
-        blog_resp = requests.get(blog_url, params={"query": rel_keyword, "display": 1}, headers=blog_headers, timeout=5)
-        blog_total = blog_resp.json().get('total', 0) if blog_resp.status_code == 200 else 0
-    except: blog_total = 0
-        
+    blog_total = 0
+    # [수정됨] 차단 방어 로직: 에러 시 최대 3번까지 재시도
+    for attempt in range(3):
+        try:
+            blog_resp = requests.get(blog_url, params={"query": rel_keyword, "display": 1}, headers=blog_headers, timeout=5)
+            
+            if blog_resp.status_code == 200:
+                blog_total = blog_resp.json().get('total', 0)
+                break  # 성공적으로 데이터를 받아오면 반복문 탈출
+            elif blog_resp.status_code == 429:
+                time.sleep(0.5)  # 너무 빨라서 차단당하면 0.5초 대기 후 재시도
+                continue
+            else:
+                break  # 권한 부족(401, 403) 등 다른 에러면 즉시 중단
+        except:
+            time.sleep(0.5)
+            continue
+            
     saturation = round(blog_total / total_vol, 2) if total_vol > 0 else 0
     opportunity = round((total_vol / (blog_total + 1)) * 100, 2)
 

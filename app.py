@@ -153,45 +153,69 @@ def analyze_top_blogs(target_keyword, total_vol):
         
     items = resp.json().get('items', [])
     metrics = {"text_len": 0, "img": 0, "kw": 0, "tag": 0, "title": 0, "count": 0}
-    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    
+    # [정밀화] 실제 크롬 브라우저인 것처럼 헤더를 더욱 상세히 위장
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
     
     for item in items:
         try:
-            # 1. 블로그 주소 변환 (모바일 주소가 섞여있을 경우 대비)
-            link = item['link'].replace("blog.naver.com", "m.blog.naver.com")
+            # 1. 주소 정규화 (가장 정확한 모바일 주소 체계로 변환)
+            # 예: https://blog.naver.com/id/12345 -> https://m.blog.naver.com/id/12345
+            link = item['link'].replace("https://blog.naver.com/", "https://m.blog.naver.com/")
+            
             res = requests.get(link, headers=req_headers, timeout=5)
+            res.encoding = 'utf-8' # 인코딩 강제 고정
             soup = BeautifulSoup(res.text, "html.parser")
             
-            # 2. 본문 영역 정밀 타격 (스마트에디터 ONE 전용 클래스 추출)
-            # 모바일 버전 페이지가 구조가 단순하여 더 정확한 데이터 추출이 가능합니다.
-            content_area = soup.select_one(".se-main-container")
+            # 2. 본문 영역 탐색 (다중 레이어 체크)
+            # 신형(se-main-container) -> 구형(post_ct) -> 최후 수단(div) 순으로 탐색
+            content_area = soup.select_one(".se-main-container") or soup.select_one("#postViewArea") or soup.select_one(".post_ct")
             
             if content_area:
-                # 텍스트 추출 (불필요한 공백 제거 및 정제)
-                content_text = content_area.get_text(separator=' ', strip=True)
-                clean_text = content_text.replace(" ", "")
+                # [텍스트 정밀 추출] 불필요한 태그 제거 후 순수 텍스트만 추출
+                for s in content_area(["script", "style", "iframe", "header", "footer"]): 
+                    s.extract()
+                
+                # 띄어쓰기 포함하여 텍스트 가져온 뒤, 글자수 셀 때는 공백 제거
+                raw_text = content_area.get_text(" ", strip=True)
+                clean_text = "".join(raw_text.split()) # 모든 공백 제거
                 
                 metrics["text_len"] += len(clean_text)
                 
-                # 본문 내 이미지 개수 (기본 이미지 및 스티커 제외 필터링)
-                # se-image-resource 클래스를 가진 이미지만 카운트
-                imgs = content_area.select(".se-image-resource, .se-inline-image-resource")
-                metrics["img"] += len(imgs)
+                # [이미지 정밀 추출] 광고성 이미지, 아이콘, 스티커(라인프렌즈 등) 제외
+                # 네이버 블로그 이미지는 보통 특정 클래스나 경로를 가짐
+                all_imgs = content_area.find_all("img")
+                real_imgs = []
+                for img in all_imgs:
+                    src = img.get('src', '')
+                    # 스티커(sticker), 프로필(profile), 아이콘(emoji) 관련 경로 제외
+                    if 'postfiles' in src or 'blogfiles' in src:
+                        if 'static.naver.net' not in src:
+                            real_imgs.append(img)
                 
-                # 본문 내 키워드 반복 횟수
-                metrics["kw"] += content_text.count(target_keyword)
+                metrics["img"] += len(real_imgs)
                 
-                # 태그 추출
-                tags = soup.select(".item_tag, .tag_item")
+                # [키워드 반복수] 공백 제거 전 텍스트에서 검색
+                metrics["kw"] += raw_text.count(target_keyword)
+                
+                # [태그 수]
+                tags = soup.select(".item_tag, .tag_item, .tag_list a")
                 metrics["tag"] += len(tags)
                 
                 metrics["title"] += len(BeautifulSoup(item['title'], "html.parser").get_text().replace(" ", ""))
                 metrics["count"] += 1
-        except Exception as e:
+                
+            time.sleep(0.3) # 네이버의 차단을 피하기 위한 미세한 간격
+        except:
             continue
 
     if metrics["count"] == 0: return None
     
+    # 상위 노출 시 예상 일 방문자 계산 (CTR 10%)
     expected_daily = int((total_vol / 30) * 0.1)
     
     return {

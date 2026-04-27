@@ -144,87 +144,217 @@ def fetch_blog_data(item):
 
 
 def analyze_top_blogs(target_keyword, total_vol):
-    url = "https://openapi.naver.com/v1/search/blog.json"
-    headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
-    params = {"query": target_keyword, "display": 3, "sort": "sim"}
-    
-    resp = requests.get(url, params=params, headers=headers)
-    if resp.status_code != 200 or not resp.json().get('items'): return None
-        
-    items = resp.json().get('items', [])
-    metrics = {"text_len": 0, "img": 0, "kw": 0, "tag": 0, "title": 0, "count": 0}
-    
-    # [정밀화] 실제 크롬 브라우저인 것처럼 헤더를 더욱 상세히 위장
-    req_headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
-    
-    for item in items:
-        try:
-            # 1. 주소 정규화 (가장 정확한 모바일 주소 체계로 변환)
-            # 예: https://blog.naver.com/id/12345 -> https://m.blog.naver.com/id/12345
-            link = item['link'].replace("https://blog.naver.com/", "https://m.blog.naver.com/")
-            
-            res = requests.get(link, headers=req_headers, timeout=5)
-            res.encoding = 'utf-8' # 인코딩 강제 고정
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 2. 본문 영역 탐색 (다중 레이어 체크)
-            # 신형(se-main-container) -> 구형(post_ct) -> 최후 수단(div) 순으로 탐색
-            content_area = soup.select_one(".se-main-container") or soup.select_one("#postViewArea") or soup.select_one(".post_ct")
-            
-            if content_area:
-                # [텍스트 정밀 추출] 불필요한 태그 제거 후 순수 텍스트만 추출
-                for s in content_area(["script", "style", "iframe", "header", "footer"]): 
-                    s.extract()
-                
-                # 띄어쓰기 포함하여 텍스트 가져온 뒤, 글자수 셀 때는 공백 제거
-                raw_text = content_area.get_text(" ", strip=True)
-                clean_text = "".join(raw_text.split()) # 모든 공백 제거
-                
-                metrics["text_len"] += len(clean_text)
-                
-                # [이미지 정밀 추출] 광고성 이미지, 아이콘, 스티커(라인프렌즈 등) 제외
-                # 네이버 블로그 이미지는 보통 특정 클래스나 경로를 가짐
-                all_imgs = content_area.find_all("img")
-                real_imgs = []
-                for img in all_imgs:
-                    src = img.get('src', '')
-                    # 스티커(sticker), 프로필(profile), 아이콘(emoji) 관련 경로 제외
-                    if 'postfiles' in src or 'blogfiles' in src:
-                        if 'static.naver.net' not in src:
-                            real_imgs.append(img)
-                
-                metrics["img"] += len(real_imgs)
-                
-                # [키워드 반복수] 공백 제거 전 텍스트에서 검색
-                metrics["kw"] += raw_text.count(target_keyword)
-                
-                # [태그 수]
-                tags = soup.select(".item_tag, .tag_item, .tag_list a")
-                metrics["tag"] += len(tags)
-                
-                metrics["title"] += len(BeautifulSoup(item['title'], "html.parser").get_text().replace(" ", ""))
-                metrics["count"] += 1
-                
-            time.sleep(0.3) # 네이버의 차단을 피하기 위한 미세한 간격
-        except:
-            continue
 
-    if metrics["count"] == 0: return None
-    
-    # 상위 노출 시 예상 일 방문자 계산 (CTR 10%)
-    expected_daily = int((total_vol / 30) * 0.1)
-    
+    # ── 내부 헬퍼 1. 절사평균 ─────────────────────────────────────
+    def trim_mean(values, trim=0.1):
+        if not values:
+            return 0
+        if len(values) < 4:
+            return int(sum(values) / len(values))
+        values_sorted = sorted(values)
+        cut = max(1, int(len(values_sorted) * trim))
+        trimmed = values_sorted[cut:-cut]
+        return int(sum(trimmed) / len(trimmed)) if trimmed else 0
+
+    # ── 내부 헬퍼 2. 실제 검색 결과 상위 URL 수집 ────────────────
+    def get_top_blog_urls(keyword, count=20):
+        url = f"https://search.naver.com/search.naver?where=blog&query={requests.utils.quote(keyword)}"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.naver.com",
+            "Accept-Language": "ko-KR,ko;q=0.9",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=8)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            links = []
+            for a in soup.select("a.title_link, a.api_txt_lines, .total_tit a"):
+                href = a.get("href", "")
+                if "blog.naver.com" in href and href not in links:
+                    links.append(href)
+                if len(links) >= count:
+                    break
+            return links
+        except:
+            return []
+
+    # ── 내부 헬퍼 3. 비본문 제거 후 순수 글자수 추출 ────────────
+    def extract_clean_text(soup):
+        REMOVE_SELECTORS = [
+            "script", "style", "iframe",
+            ".se-author", ".se-publishDate",
+            ".wrap_btn_post", ".post_tag",
+            ".comment_box", ".post_footer",
+            ".__se_toc_wrapper", ".se-module-oglink",
+            ".se-sticker", ".se-documentTitle",
+        ]
+        content = (
+            soup.select_one(".se-main-container")
+            or soup.select_one("#postViewArea")
+            or soup.select_one(".post_ct")
+            or soup.select_one(".__se_doc_viewer")
+        )
+        if not content:
+            return "", None
+        for selector in REMOVE_SELECTORS:
+            for tag in content.select(selector):
+                tag.decompose()
+        raw = content.get_text(" ", strip=True)
+        return "".join(raw.split()), content
+
+    # ── 내부 헬퍼 4. 실제 본문 이미지만 카운트 ──────────────────
+    def count_real_images(content_area):
+        EXCLUDE_PATTERNS = [
+            "sticker", "emoticon", "emoji",
+            "static.naver.net", "dthumb.phinf",
+            "storep-phinf", "profile", "avatar",
+            "favicon", "btnplay", "ico_", "icon",
+        ]
+        count = 0
+        for img in content_area.find_all("img"):
+            src = (img.get("src") or img.get("data-lazy-src") or "").lower()
+            alt = (img.get("alt") or "").lower()
+            if any(pat in src or pat in alt for pat in EXCLUDE_PATTERNS):
+                continue
+            width = img.get("width", "")
+            try:
+                if width and int(str(width).replace("px", "")) < 100:
+                    continue
+            except ValueError:
+                pass
+            count += 1
+        return count
+
+    # ── 내부 헬퍼 5. 순위별 CTR 반영 예상 방문자 ─────────────────
+    def estimate_daily_visitors(total_vol):
+        CTR_BY_RANK = {1: 0.28, 2: 0.15, 3: 0.09, 4: 0.06, 5: 0.04}
+        if total_vol > 10000:
+            penalty = 0.6
+        elif total_vol > 3000:
+            penalty = 0.75
+        else:
+            penalty = 1.0
+        return {
+            "1위_예상": int((total_vol / 30) * CTR_BY_RANK[1] * penalty),
+            "3위_예상": int((total_vol / 30) * CTR_BY_RANK[3] * penalty),
+            "5위_예상": int((total_vol / 30) * CTR_BY_RANK[5] * penalty),
+        }
+
+    # ── 메인 로직 시작 ────────────────────────────────────────────
+    req_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        "Referer": "https://search.naver.com",
+    }
+
+    # 1) 실제 검색 결과 상위 URL 수집 시도, 실패 시 API 폴백
+    urls = get_top_blog_urls(target_keyword, count=20)
+
+    if not urls:
+        # 폴백: 기존 API 방식 (display=30으로 샘플 확대)
+        blog_url = "https://openapi.naver.com/v1/search/blog.json"
+        blog_headers = {
+            "X-Naver-Client-Id": CLIENT_ID,
+            "X-Naver-Client-Secret": CLIENT_SECRET,
+        }
+        try:
+            fallback_resp = requests.get(
+                blog_url,
+                params={"query": target_keyword, "display": 30, "sort": "sim"},
+                headers=blog_headers,
+                timeout=5,
+            )
+            if fallback_resp.status_code != 200 or not fallback_resp.json().get("items"):
+                return None
+            urls = [item["link"] for item in fallback_resp.json()["items"]]
+        except:
+            return None
+
+    # 2) 각 URL 크롤링 및 지표 수집
+    metrics = {
+        "text_len": [], "img": [], "kw": [],
+        "tag": [], "title_len": [],
+    }
+    failed_urls = []
+
+    def crawl_one(link):
+        try:
+            if "m.blog.naver.com" not in link:
+                mob_link = link.replace("https://blog.naver.com/", "https://m.blog.naver.com/") \
+                               .replace("http://blog.naver.com/", "https://m.blog.naver.com/")
+            else:
+                mob_link = link
+
+            resp = requests.get(mob_link, headers=req_headers, timeout=6)
+            resp.encoding = "utf-8"
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            clean_text, content_area = extract_clean_text(soup)
+
+            if not content_area or not clean_text:
+                return None, {"url": mob_link, "사유": "본문 영역 탐색 실패"}
+
+            meta_title = soup.select_one("meta[property='og:title']")
+            plain_title = soup.select_one("title")
+            if meta_title:
+                title_text = meta_title.get("content", "")
+            elif plain_title:
+                title_text = plain_title.get_text()
+            else:
+                title_text = ""
+
+            return {
+                "text_len":  len(clean_text),
+                "img":       count_real_images(content_area),
+                "kw":        content_area.get_text().count(target_keyword),
+                "tag":       len(soup.select(".item_tag, .tag_item, .tag_list a, ._postTagList a")),
+                "title_len": len(title_text.replace(" ", "")),
+            }, None
+
+        except Exception as e:
+            return None, {"url": link, "사유": str(e)}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        crawl_results = list(executor.map(crawl_one, urls))
+
+    for result, error in crawl_results:
+        if error:
+            failed_urls.append(error)
+        elif result:
+            for key in metrics:
+                metrics[key].append(result[key])
+
+    # 3) 크롤링 실패 현황 Streamlit 노출
+    if failed_urls:
+        with st.expander(f"⚠️ 크롤링 실패 {len(failed_urls)}건 (클릭해서 확인)"):
+            st.dataframe(pd.DataFrame(failed_urls), use_container_width=True)
+
+    # 수집 성공 샘플이 없으면 None 반환
+    if not metrics["text_len"]:
+        return None
+
+    # 4) 절사평균으로 최종 지표 계산
+    visitors = estimate_daily_visitors(total_vol)
+
     return {
-        "text": int(metrics["text_len"]/metrics["count"]), 
-        "img": int(metrics["img"]/metrics["count"]),
-        "kw": int(metrics["kw"]/metrics["count"]), 
-        "tag": int(metrics["tag"]/metrics["count"]),
-        "title": int(metrics["title"]/len(items)), 
-        "visitors": expected_daily
+        "text":     trim_mean(metrics["text_len"]),
+        "img":      trim_mean(metrics["img"]),
+        "kw":       trim_mean(metrics["kw"]),
+        "tag":      trim_mean(metrics["tag"]),
+        "title":    trim_mean(metrics["title_len"]),
+        "visitors": visitors["3위_예상"],          # 기존 호환용 단일 값
+        "visitors_detail": visitors,               # 순위별 상세
+        "sample_count": len(metrics["text_len"]),  # 실제 분석된 샘플 수
     }
 
 # ==========================================
@@ -366,28 +496,43 @@ with tab3:
     g_keyword = st.text_input("타겟 키워드 입력:", placeholder="예: 자동차 방향제 추천")
     if st.button("가이드 생성"):
         kw_data = get_base_keywords(g_keyword)
-        
-        # [수정됨] API 실패(None 반환) 시 로직 중단
         if kw_data is None:
             st.stop()
-            
-        target = next((item for item in kw_data if item['relKeyword'].replace(" ", "") == g_keyword.replace(" ", "")), None)
-        
+
+        target = next(
+            (item for item in kw_data
+             if item['relKeyword'].replace(" ", "") == g_keyword.replace(" ", "")),
+            None
+        )
+
         if target:
             vol = (target['monthlyPcQcCnt'] or 0) + (target['monthlyMobileQcCnt'] or 0)
             with st.spinner('실시간 포스팅 데이터 분석 중...'):
                 res = analyze_top_blogs(g_keyword, vol)
-            
+
             if res:
-                st.success(f"'{g_keyword}' 상위 3개 블로그 분석 완료 (월 검색량: {vol:,})")
+                st.success(
+                    f"'{g_keyword}' 상위 블로그 **{res['sample_count']}개** 분석 완료 "
+                    f"(월 검색량: {vol:,})"
+                )
                 c1, c2, c3 = st.columns(3)
                 c4, c5, c6 = st.columns(3)
-                
+
                 c1.metric("권장 글자 수", f"{res['text']:,}자")
                 c2.metric("평균 이미지", f"{res['img']}개")
                 c3.metric("키워드 반복", f"{res['kw']}회")
                 c4.metric("평균 해시태그", f"{res['tag']}개")
                 c5.metric("제목 길이", f"{res['title']}자")
-                c6.metric("예상 일 방문자", f"{res['visitors']}명", help="1~3위 이내 노출 시 기대할 수 있는 유입량입니다.")
-            else: st.error("블로그 데이터를 읽어올 수 없습니다.")
-        else: st.error("해당 키워드의 검색량 정보를 찾을 수 없습니다.")
+                c6.metric(
+                    "예상 일 방문자 (3위 기준)",
+                    f"{res['visitors']}명",
+                    help=(
+                        f"1위 노출 시 {res['visitors_detail']['1위_예상']}명 / "
+                        f"3위 {res['visitors_detail']['3위_예상']}명 / "
+                        f"5위 {res['visitors_detail']['5위_예상']}명 예상"
+                    )
+                )
+            else:
+                st.error("블로그 데이터를 읽어올 수 없습니다.")
+        else:
+            st.error("해당 키워드의 검색량 정보를 찾을 수 없습니다.")

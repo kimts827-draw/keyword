@@ -211,11 +211,31 @@ def fetch_product_data(url):
 
         if api_resp.status_code != 200:
             return {
-                "error": f"API 호출 실패 (status: {api_resp.status_code})",
+                "error": f"API 호출 실패 (status: {api_resp.status_code}) / 응답내용: {api_resp.text[:200]}",
                 "url": url
             }
 
-        data = api_resp.json()
+        # 응답이 비어있는지 먼저 확인
+        if not api_resp.text.strip():
+            return {
+                "error": f"API 응답이 비어있음 (빈 응답). 상품번호: {product_no}",
+                "url": url
+            }
+
+        # JSON이 아닌 HTML이 온 경우 (로그인 요구, 차단 페이지 등)
+        if api_resp.text.strip().startswith("<"):
+            return {
+                "error": f"JSON 대신 HTML 응답 수신 — 네이버가 봇으로 차단했을 가능성. 상품번호: {product_no}",
+                "url": url
+            }
+
+        try:
+            data = api_resp.json()
+        except Exception as json_err:
+            return {
+                "error": f"JSON 파싱 실패: {json_err} / 응답 앞부분: {api_resp.text[:300]}",
+                "url": url
+            }
 
         # ── JSON에서 데이터 추출 ──────────────────────────────
         # 스마트스토어 API 응답 구조
@@ -872,9 +892,11 @@ with tab4:
         # 오류 체크
         if "error" in my_data:
             st.error(f"❌ 내 상품 수집 실패: {my_data['error']}")
+            st.code(f"입력 URL: {my_data['url']}")
             st.stop()
         if "error" in comp_data:
             st.error(f"❌ 경쟁 상품 수집 실패: {comp_data['error']}")
+            st.code(f"입력 URL: {comp_data['url']}")
             st.stop()
 
         my_score   = calculate_score(my_data)

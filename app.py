@@ -7,6 +7,7 @@ import base64
 import datetime
 import io
 import re
+import json
 import streamlit as st
 import concurrent.futures
 from bs4 import BeautifulSoup
@@ -149,178 +150,177 @@ def fetch_blog_data(item):
 def fetch_product_data(url):
     import re
 
+    url = url.strip()
+
+    # 실제 브라우저와 동일한 세션 사용
+    session = requests.Session()
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://smartstore.naver.com",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
     }
 
     try:
-        url = url.strip()
+        # ── Step 1. 상품 페이지 먼저 방문 (쿠키 획득) ────────────
+        # 실제 브라우저처럼 상품 페이지를 먼저 열어서 세션 쿠키를 받아옴
+        page_resp = session.get(url, headers=headers, timeout=10)
+        page_resp.encoding = "utf-8"
+        html = page_resp.text
 
-        # ── 상품번호 추출 ─────────────────────────────────────
-        # 형태 1: /products/1234567890
-        # 형태 2: ?productNo=1234567890
-        product_no = None
-
-        match1 = re.search(r'/products/(\d+)', url)
-        match2 = re.search(r'productNo=(\d+)', url)
-        if match1:
-            product_no = match1.group(1)
-        elif match2:
-            product_no = match2.group(1)
-
-        # 스토어 slug 추출 (smartstore.naver.com/slug/products/...)
-        store_slug = ""
-        slug_match = re.search(
-            r'smartstore\.naver\.com/([^/?#]+)', url
+        # ── Step 2. HTML 안의 __NEXT_DATA__ JSON에서 데이터 추출 ──
+        # 스마트스토어는 페이지 HTML 안에 __NEXT_DATA__라는 script 태그에
+        # 상품 전체 데이터를 JSON으로 내장하고 있음
+        next_data_match = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL
         )
-        if slug_match:
-            store_slug = slug_match.group(1)
 
-        if not product_no:
-            # 상품번호가 URL에 없으면 페이지 HTML에서 추출 시도
-            resp = requests.get(url, headers=headers, timeout=10)
-            resp.encoding = "utf-8"
-            # __NEXT_DATA__ 안에 상품번호 포함되어 있음
-            match3 = re.search(r'"nvMid"\s*:\s*"?(\d+)"?', resp.text)
-            match4 = re.search(r'"productNo"\s*:\s*(\d+)', resp.text)
-            if match3:
-                product_no = match3.group(1)
-            elif match4:
-                product_no = match4.group(1)
+        if next_data_match:
+            try:
+                next_data = json.loads(next_data_match.group(1))
 
-        if not product_no:
-            return {"error": "상품번호를 찾을 수 없습니다. URL을 확인해주세요.", "url": url}
+                # __NEXT_DATA__ 안의 경로 탐색
+                props = next_data.get("props", {})
+                page_props = props.get("pageProps", {})
 
-        # ── 내부 JSON API 호출 ────────────────────────────────
-        api_url = f"https://smartstore.naver.com/i/v1/products/{product_no}"
-        api_resp = requests.get(api_url, headers=headers, timeout=10)
+                # 상품 데이터가 있는 위치 탐색 (구조가 달라질 수 있어 여러 경로 시도)
+                product_data = (
+                    page_props.get("initialState", {}).get("product", {}).get("A", {})
+                    or page_props.get("initialState", {}).get("productDetail", {})
+                    or page_props.get("product", {})
+                    or {}
+                )
 
-        if api_resp.status_code != 200:
-            # 폴백: 다른 API 엔드포인트 시도
-            api_url2 = (
-                f"https://shopping.naver.com/catalog/api/products/nvMid/{product_no}"
-            )
-            api_resp = requests.get(api_url2, headers=headers, timeout=10)
+                product      = product_data.get("productInfoResponse", {}).get("product", {}) or product_data
+                review_stat  = product_data.get("productReviewInfoResponse", {}) or {}
+                channel_data = product_data.get("channelJoinStatusResponse", {}) or {}
 
-        if api_resp.status_code != 200:
-            return {
-                "error": f"API 호출 실패 (status: {api_resp.status_code}) / 응답내용: {api_resp.text[:200]}",
-                "url": url
-            }
+                product_name = (
+                    product.get("name", "")
+                    or product.get("productName", "")
+                )[:40]
 
-        # 응답이 비어있는지 먼저 확인
-        if not api_resp.text.strip():
-            return {
-                "error": f"API 응답이 비어있음 (빈 응답). 상품번호: {product_no}",
-                "url": url
-            }
+                price = (
+                    product.get("salePrice", 0)
+                    or product.get("discountedSalePrice", 0)
+                )
 
-        # JSON이 아닌 HTML이 온 경우 (로그인 요구, 차단 페이지 등)
-        if api_resp.text.strip().startswith("<"):
-            return {
-                "error": f"JSON 대신 HTML 응답 수신 — 네이버가 봇으로 차단했을 가능성. 상품번호: {product_no}",
-                "url": url
-            }
+                review_count = (
+                    review_stat.get("reviewCount", 0)
+                    or product.get("reviewCount", 0)
+                )
 
-        try:
-            data = api_resp.json()
-        except Exception as json_err:
-            return {
-                "error": f"JSON 파싱 실패: {json_err} / 응답 앞부분: {api_resp.text[:300]}",
-                "url": url
-            }
+                rating = round(float(
+                    review_stat.get("averageReviewScore", 0)
+                    or product.get("averageReviewScore", 0)
+                    or 0
+                ), 1)
 
-        # ── JSON에서 데이터 추출 ──────────────────────────────
-        # 스마트스토어 API 응답 구조
-        product     = data.get("product", data)
-        channel     = data.get("channel", {})
-        sale_stat   = data.get("saleStat", {})
-        review_stat = data.get("reviewStat", {})
+                wish_count = (
+                    product.get("wishCount", 0)
+                    or channel_data.get("wishCount", 0)
+                )
+
+                sales_count = product.get("totalSoldQuantity", 0) or 0
+
+                images = product.get("productImages", []) or []
+                img_count = len(images)
+
+                reg_date = (product.get("regDate", "") or "")[:10]
+
+                # 데이터가 제대로 왔는지 확인
+                if product_name:
+                    return {
+                        "상품명":   product_name,
+                        "가격":     price,
+                        "리뷰수":   review_count,
+                        "평점":     rating,
+                        "찜수":     wish_count,
+                        "판매량":   sales_count,
+                        "이미지수": img_count,
+                        "등록일":   reg_date or "확인불가",
+                        "url":      url,
+                    }
+
+            except Exception as e:
+                pass   # __NEXT_DATA__ 파싱 실패 시 Step 3으로 넘어감
+
+        # ── Step 3. __NEXT_DATA__ 실패 시 HTML에서 직접 추출 ──────
+        soup = BeautifulSoup(html, "html.parser")
 
         # 상품명
-        product_name = (
-            product.get("name", "")
-            or product.get("productName", "")
-            or data.get("name", "")
-        )[:40]
+        product_name = ""
+        name_tag = soup.select_one("meta[property='og:title']")
+        if name_tag:
+            product_name = name_tag.get("content", "")[:40]
 
         # 가격
-        price = (
-            product.get("salePrice", 0)
-            or product.get("discountedSalePrice", 0)
-            or data.get("salePrice", 0)
-        )
+        price = 0
+        price_tag = soup.select_one("meta[property='product:price:amount']")
+        if price_tag:
+            try:
+                price = int(price_tag.get("content", "0").replace(",", ""))
+            except:
+                pass
 
-        # 리뷰 수
-        review_count = (
-            review_stat.get("reviewCount", 0)
-            or data.get("reviewCount", 0)
-            or product.get("reviewCount", 0)
-        )
+        # 리뷰수, 평점 — meta 태그에서 추출
+        review_count = 0
+        rating = 0.0
+        review_tag = soup.select_one("meta[property='product:rating:value']")
+        review_count_tag = soup.select_one("meta[property='product:rating:count']")
+        if review_tag:
+            try:
+                rating = round(float(review_tag.get("content", "0")), 1)
+            except:
+                pass
+        if review_count_tag:
+            try:
+                review_count = int(review_count_tag.get("content", "0"))
+            except:
+                pass
 
-        # 평점
-        rating = (
-            review_stat.get("averageReviewScore", 0.0)
-            or data.get("averageReviewScore", 0.0)
-            or product.get("averageReviewScore", 0.0)
-        )
-        try:
-            rating = round(float(rating), 1)
-        except:
-            rating = 0.0
+        # 판매량 — 텍스트에서 추출
+        sales_count = 0
+        sales_match = re.search(r'(\d[\d,]+)\s*개\s*판매', html)
+        if sales_match:
+            try:
+                sales_count = int(sales_match.group(1).replace(",", ""))
+            except:
+                pass
 
-        # 찜 수
-        wish_count = (
-            data.get("wishCount", 0)
-            or product.get("wishCount", 0)
-            or channel.get("wishCount", 0)
-        )
+        # 찜수 — 텍스트에서 추출
+        wish_count = 0
+        wish_match = re.search(r'(\d[\d,]+)\s*명이\s*찜|찜\s*(\d[\d,]+)', html)
+        if wish_match:
+            try:
+                num = wish_match.group(1) or wish_match.group(2)
+                wish_count = int(num.replace(",", ""))
+            except:
+                pass
 
-        # 판매량 (공개된 경우만)
-        sales_count = (
-            sale_stat.get("soldQuantity", 0)
-            or data.get("soldQuantity", 0)
-            or product.get("totalSoldQuantity", 0)
-        )
-
-        # 이미지 수
-        images = (
-            product.get("productImages", [])
-            or data.get("productImages", [])
-            or []
-        )
-        img_count = len(images)
-
-        # 등록일
-        reg_date = (
-            product.get("regDate", "")
-            or data.get("regDate", "")
-            or ""
-        )
-        if reg_date:
-            reg_date = reg_date[:10]
-
-        # ── 디버그용: 원본 JSON 키 확인 ──────────────────────
-        # 데이터가 0으로 나올 경우 아래 주석을 풀어서 실제 키 구조 확인
-        # st.write(data)
+        if not product_name:
+            return {
+                "error": "상품 데이터를 찾을 수 없습니다. 스마트스토어 URL인지 확인해주세요.",
+                "url": url
+            }
 
         return {
-            "상품명":   product_name or "상품명 불러오기 실패",
+            "상품명":   product_name,
             "가격":     price,
             "리뷰수":   review_count,
             "평점":     rating,
             "찜수":     wish_count,
             "판매량":   sales_count,
-            "이미지수": img_count,
-            "등록일":   reg_date or "확인불가",
-            "상품번호": product_no,
+            "이미지수": 0,
+            "등록일":   "확인불가",
             "url":      url,
         }
 

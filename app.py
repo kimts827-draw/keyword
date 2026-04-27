@@ -191,6 +191,15 @@ def fetch_product_data(url):
             try:
                 next_data = json.loads(next_data_match.group(1))
 
+                # ── 임시 디버그: 실제 JSON 최상위 키 구조 확인 ──
+                st.write("✅ __NEXT_DATA__ 발견. 최상위 키:", list(next_data.keys()))
+                props = next_data.get("props", {})
+                page_props = props.get("pageProps", {})
+                st.write("pageProps 키:", list(page_props.keys()))
+                if "initialState" in page_props:
+                    st.write("initialState 키:", list(page_props["initialState"].keys()))
+                # ────────────────────────────────────────────────
+
                 # __NEXT_DATA__ 안의 경로 탐색
                 props = next_data.get("props", {})
                 page_props = props.get("pageProps", {})

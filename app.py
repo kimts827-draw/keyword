@@ -183,6 +183,10 @@ def fetch_product_data(url):
             re.DOTALL
         )
 
+        # ── 임시 디버그: 실제로 어떤 HTML이 오는지 확인 ──────────
+        st.code(html[:500], language="html")
+        # ─────────────────────────────────────────────────────────
+
         if next_data_match:
             try:
                 next_data = json.loads(next_data_match.group(1))

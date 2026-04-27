@@ -38,12 +38,10 @@ def get_base_keywords(seed_keyword):
     resp = requests.get(base_url + path, params=params, headers=headers)
     return resp.json().get('keywordList', []) if resp.status_code == 200 else []
 
-# [네이버 데이터랩 API 호출 - 성별/연령 분석]
 def get_datalab_analysis(keyword):
     url = "https://openapi.naver.com/v1/datalab/search"
     headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET, "Content-Type": "application/json"}
     
-    # 최근 1개월 데이터 분석
     end_date = datetime.datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
     
@@ -52,16 +50,68 @@ def get_datalab_analysis(keyword):
         "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
     }
     
-    # 성별 분석
-    res_gender = requests.post(url.replace("search", "share/gender"), headers=headers, json=body).json()
-    # 연령 분석
-    res_age = requests.post(url.replace("search", "share/age"), headers=headers, json=body).json()
-    
-    return res_gender, res_age
+    # 예외 처리를 추가하여 권한이 없더라도 에러가 나지 않도록 방어
+    try:
+        res_gender = requests.post(url.replace("search", "share/gender"), headers=headers, json=body).json()
+        res_age = requests.post(url.replace("search", "share/age"), headers=headers, json=body).json()
+        return res_gender, res_age
+    except:
+        return {}, {}
 
 # ==========================================
 # [분석 및 크롤링 로직]
 # ==========================================
+def fetch_shop_data(item):
+    rel_keyword = item['relKeyword']
+    total_vol = (item['monthlyPcQcCnt'] if isinstance(item['monthlyPcQcCnt'], int) else 0) + \
+                (item['monthlyMobileQcCnt'] if isinstance(item['monthlyMobileQcCnt'], int) else 0)
+    
+    shop_url = "https://openapi.naver.com/v1/search/shop.json"
+    shop_headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
+    
+    try:
+        shop_resp = requests.get(shop_url, params={"query": rel_keyword, "display": 1}, headers=shop_headers, timeout=5)
+        product_count = shop_resp.json().get('total', 0) if shop_resp.status_code == 200 else 0
+        category = "없음"
+        if product_count > 0 and shop_resp.json().get('items'):
+            item_info = shop_resp.json()['items'][0]
+            categories = [item_info.get('category1', ''), item_info.get('category2', ''), 
+                          item_info.get('category3', ''), item_info.get('category4', '')]
+            category = " > ".join([c for c in categories if c])
+    except:
+        product_count, category = 0, "통신오류"
+        
+    competition = round(product_count / total_vol, 2) if total_vol > 0 else 0
+    conversion = round((total_vol / (product_count + 1)) * 100, 2)
+    
+    info_keywords = ['방법', '후기', '추천', '비교', '차이', '원인', '증상', '뜻', '이유', '만들기', '순위', '종류']
+    if product_count == 0: keyword_type = "주의 (상품없음)"
+    elif any(word in rel_keyword for word in info_keywords): keyword_type = "블로그용 (정보성)"
+    elif total_vol > 100 and (product_count / total_vol) < 0.1: keyword_type = "블로그용 (낮은 상품비율)"
+    else: keyword_type = "쇼핑용"
+        
+    return {"성향": keyword_type, "연관키워드": rel_keyword, "쇼핑 카테고리": category,
+            "월 검색량": total_vol, "상품수": product_count, "경쟁률(포화도)": competition, "쇼핑전환기회": conversion}
+
+def fetch_blog_data(item):
+    rel_keyword = item['relKeyword']
+    total_vol = (item['monthlyPcQcCnt'] if isinstance(item['monthlyPcQcCnt'], int) else 0) + \
+                (item['monthlyMobileQcCnt'] if isinstance(item['monthlyMobileQcCnt'], int) else 0)
+    
+    blog_url = "https://openapi.naver.com/v1/search/blog.json"
+    blog_headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
+    
+    try:
+        blog_resp = requests.get(blog_url, params={"query": rel_keyword, "display": 1}, headers=blog_headers, timeout=5)
+        blog_total = blog_resp.json().get('total', 0) if blog_resp.status_code == 200 else 0
+    except: blog_total = 0
+        
+    saturation = round(blog_total / total_vol, 2) if total_vol > 0 else 0
+    opportunity = round((total_vol / (blog_total + 1)) * 100, 2)
+    
+    return {"연관키워드": rel_keyword, "월간 검색량": total_vol, "블로그 누적 발행량": blog_total,
+            "블로그 포화도(경쟁도)": saturation, "노출 기회(블루오션 지수)": opportunity}
+
 def analyze_top_blogs(target_keyword, total_vol):
     url = "https://openapi.naver.com/v1/search/blog.json"
     headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET}
@@ -86,21 +136,17 @@ def analyze_top_blogs(target_keyword, total_vol):
                 metrics["text_len"] += len(content.replace(" ", ""))
                 metrics["img"] += len(s.find_all("img"))
                 metrics["kw"] += content.count(target_keyword)
-                metrics["tag"] += len(s.select(".blog2_post_tag_area a, .item_tag")) # 해시태그 패턴
+                metrics["tag"] += len(s.select(".blog2_post_tag_area a, .item_tag")) 
                 metrics["title"] += len(BeautifulSoup(item['title'], "html.parser").get_text().replace(" ", ""))
                 metrics["count"] += 1
         except: continue
 
     if metrics["count"] == 0: return None
-    
-    # 상위 노출 시 예상 일 방문자 계산 (CTR 10% 가정)
     expected_daily = int((total_vol / 30) * 0.1)
     
-    return {
-        "text": int(metrics["text_len"]/metrics["count"]), "img": int(metrics["img"]/metrics["count"]),
-        "kw": int(metrics["kw"]/metrics["count"]), "tag": int(metrics["tag"]/metrics["count"]),
-        "title": int(metrics["title"]/len(items)), "visitors": expected_daily
-    }
+    return {"text": int(metrics["text_len"]/metrics["count"]), "img": int(metrics["img"]/metrics["count"]),
+            "kw": int(metrics["kw"]/metrics["count"]), "tag": int(metrics["tag"]/metrics["count"]),
+            "title": int(metrics["title"]/len(items)), "visitors": expected_daily}
 
 # ==========================================
 # [시각화 컴포넌트]
@@ -108,35 +154,39 @@ def analyze_top_blogs(target_keyword, total_vol):
 def render_user_analysis(keyword):
     g_data, a_data = get_datalab_analysis(keyword)
     
-    if 'results' in g_data:
+    # 데이터랩 권한이나 데이터가 없을 때를 대비한 방어 코드
+    if 'results' in g_data and g_data['results']:
         st.markdown(f"#### 📊 '{keyword}' 검색 사용자 심층 분석")
         c1, c2 = st.columns([1, 2])
         
-        # 성별 비율 (최근 데이터 기준)
         with c1:
-            g_res = g_data['results'][0]['data']
+            g_res = g_data['results'][0].get('data', [])
             if g_res:
                 f_ratio = next((x['share'] for x in g_res if x.get('group') == 'f'), 50)
                 m_ratio = 100 - f_ratio
                 st.write("**성별 비중**")
                 st.markdown(f"""
                 <div style="background:#eee; border-radius:15px; height:25px; display:flex; overflow:hidden;">
-                    <div style="width:{f_ratio}%; background:#ff4b4b; color:white; text-align:center; font-size:12px;">여성</div>
-                    <div style="width:{m_ratio}%; background:#1c83e1; color:white; text-align:center; font-size:12px;">남성</div>
+                    <div style="width:{f_ratio}%; background:#ff4b4b; color:white; text-align:center; font-size:12px; line-height:25px;">여성 {f_ratio:.1f}%</div>
+                    <div style="width:{m_ratio}%; background:#1c83e1; color:white; text-align:center; font-size:12px; line-height:25px;">남성 {m_ratio:.1f}%</div>
                 </div>
                 """, unsafe_allow_html=True)
-                st.caption(f"여성 {f_ratio:.1f}% / 남성 {m_ratio:.1f}%")
+            else:
+                st.info("성별 데이터가 충분하지 않습니다.")
 
-        # 연령별 비율
         with c2:
-            a_res = a_data['results'][0]['data']
+            a_res = a_data.get('results', [{}])[0].get('data', [])
             if a_res:
                 age_df = pd.DataFrame(a_res).groupby('group')['share'].mean().reset_index()
                 age_df.columns = ['연령대', '비중']
                 age_df['연령대'] = age_df['연령대'].map({'10':'10대','20':'20대','30':'30대','40':'40대','50':'50대','60':'60대+'})
                 st.write("**연령별 분포**")
                 st.bar_chart(age_df.set_index('연령대'), height=150)
+            else:
+                st.info("연령 데이터가 충분하지 않습니다.")
         st.divider()
+    else:
+        st.warning("⚠️ 네이버 데이터랩 API 권한이 없거나, 검색량이 너무 적어 사용자 분석 지표를 불러올 수 없습니다.")
 
 # ==========================================
 # [Main UI]
@@ -151,27 +201,78 @@ with st.sidebar:
 st.title("⚡ 마케팅 통합 키워드 분석기")
 tab1, tab2, tab3 = st.tabs(["🛒 쇼핑 분석", "📝 블로그 분석", "📑 포스팅 가이드"])
 
-# [TAB 1/2 공통 수집 로직 생략 - 이전 구조 유지]
-# ... (기존 fetch_shop_data, fetch_blog_data 함수 사용) ...
-
 with tab1:
-    s_keyword = st.text_input("쇼핑 키워드:", key="s_in")
+    s_keyword = st.text_input("쇼핑 키워드:", key="s_in", placeholder="예: 차량용방향제")
     if st.button("분석 시작", key="s_bt"):
-        render_user_analysis(s_keyword)
-        # 이후 기존 쇼핑 데이터 추출 로직 진행...
+        if s_keyword.strip():
+            render_user_analysis(s_keyword)
+            
+            raw_keyword_list = get_base_keywords(s_keyword)
+            original_count = len(raw_keyword_list)
+            keyword_list = [item for item in raw_keyword_list if not any(b_word in item['relKeyword'] for b_word in blacklist)]
+            total_count = len(keyword_list)
+            
+            if total_count > 0:
+                st.info(f"블랙리스트 {original_count - total_count}개 제외, 총 **{total_count}개** 연관키워드 수집 중...")
+                results = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = {executor.submit(fetch_shop_data, item): item for item in keyword_list}
+                    for idx, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                        results.append(future.result())
+                        progress_bar.progress(idx / total_count)
+                        status_text.text(f"[{idx}/{total_count}] 병렬 수집 중...")
+                        time.sleep(0.02) 
+                
+                status_text.text("✅ 수집 완료!")
+                df_shop = pd.DataFrame(results)
+                st.dataframe(df_shop, use_container_width=True)
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_shop.to_excel(writer, index=False, sheet_name='Shop')
+                st.download_button("📥 엑셀 다운로드", buffer.getvalue(), f"{s_keyword}_쇼핑.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 with tab2:
-    b_keyword = st.text_input("블로그 키워드:", key="b_in")
+    b_keyword = st.text_input("블로그 키워드:", key="b_in", placeholder="예: 세차장 창업")
     if st.button("분석 시작", key="b_bt"):
-        render_user_analysis(b_keyword)
-        # 이후 기존 블로그 데이터 추출 로직 진행...
+        if b_keyword.strip():
+            render_user_analysis(b_keyword)
+            
+            raw_keyword_list = get_base_keywords(b_keyword)
+            original_count = len(raw_keyword_list)
+            keyword_list = [item for item in raw_keyword_list if not any(b_word in item['relKeyword'] for b_word in blacklist)]
+            total_count = len(keyword_list)
+            
+            if total_count > 0:
+                st.info(f"블랙리스트 {original_count - total_count}개 제외, 총 **{total_count}개** 연관키워드 수집 중...")
+                results = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = {executor.submit(fetch_blog_data, item): item for item in keyword_list}
+                    for idx, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                        results.append(future.result())
+                        progress_bar.progress(idx / total_count)
+                        status_text.text(f"[{idx}/{total_count}] 병렬 수집 중...")
+                        time.sleep(0.02) 
+                
+                status_text.text("✅ 수집 완료!")
+                df_blog = pd.DataFrame(results)
+                st.dataframe(df_blog, use_container_width=True)
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_blog.to_excel(writer, index=False, sheet_name='Blog')
+                st.download_button("📥 엑셀 다운로드", buffer.getvalue(), f"{b_keyword}_블로그.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 with tab3:
     st.subheader("📝 상위 노출을 위한 포스팅 가이드")
     g_keyword = st.text_input("타겟 키워드 입력:", placeholder="예: 자동차 방향제 추천")
-    
     if st.button("가이드 생성"):
-        # 검색량 조회를 위해 먼저 호출
         kw_data = get_base_keywords(g_keyword)
         target = next((item for item in kw_data if item['relKeyword'].replace(" ", "") == g_keyword.replace(" ", "")), None)
         
@@ -191,7 +292,5 @@ with tab3:
                 c4.metric("평균 해시태그", f"{res['tag']}개")
                 c5.metric("제목 길이", f"{res['title']}자")
                 c6.metric("예상 일 방문자", f"{res['visitors']}명", help="1~3위 이내 노출 시 기대할 수 있는 유입량입니다.")
-                
-                st.info("💡 **작성 팁:** 위 데이터는 상위 노출된 글들의 평균치입니다. 최소한 이 기준을 넘기도록 작성하는 것이 유리합니다.")
             else: st.error("블로그 데이터를 읽어올 수 없습니다.")
         else: st.error("해당 키워드의 검색량 정보를 찾을 수 없습니다.")

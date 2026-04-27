@@ -161,7 +161,7 @@ with tab1:
         # 이후 기존 쇼핑 데이터 추출 로직 진행...
 
 with tab2:
-    b_keyword = st.text_input("블로그 키워:", key="b_in")
+    b_keyword = st.text_input("블로그 키워드:", key="b_in")
     if st.button("분석 시작", key="b_bt"):
         render_user_analysis(b_keyword)
         # 이후 기존 블로그 데이터 추출 로직 진행...

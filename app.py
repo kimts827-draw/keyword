@@ -148,11 +148,7 @@ def fetch_blog_data(item):
 # [판매지수 분석]
 # ==========================================
 def fetch_product_data(url):
-    import re
-
     url = url.strip()
-
-    # 실제 브라우저와 동일한 세션 사용
     session = requests.Session()
 
     headers = {
@@ -168,174 +164,17 @@ def fetch_product_data(url):
     }
 
     try:
-        # ── Step 1. 상품 페이지 먼저 방문 (쿠키 획득) ────────────
-        # 실제 브라우저처럼 상품 페이지를 먼저 열어서 세션 쿠키를 받아옴
         page_resp = session.get(url, headers=headers, timeout=10)
         page_resp.encoding = "utf-8"
         html = page_resp.text
 
-        # ── Step 2. HTML 안의 __NEXT_DATA__ JSON에서 데이터 추출 ──
-        # 스마트스토어는 페이지 HTML 안에 __NEXT_DATA__라는 script 태그에
-        # 상품 전체 데이터를 JSON으로 내장하고 있음
-        next_data_match = re.search(
-            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-            html,
-            re.DOTALL
-        )
+        # ── 디버그: 실제로 받은 HTML 앞부분 출력 ──────────────
+        st.warning(f"HTTP 상태코드: {page_resp.status_code}")
+        st.warning(f"최종 URL (리다이렉트 확인): {page_resp.url}")
+        st.code(html[:1000], language="html")
+        # ──────────────────────────────────────────────────────
 
-        # ── 임시 디버그: 실제로 어떤 HTML이 오는지 확인 ──────────
-        st.code(html[:500], language="html")
-        # ─────────────────────────────────────────────────────────
-
-        if next_data_match:
-            try:
-                next_data = json.loads(next_data_match.group(1))
-
-                # ── 임시 디버그: 실제 JSON 최상위 키 구조 확인 ──
-                st.write("✅ __NEXT_DATA__ 발견. 최상위 키:", list(next_data.keys()))
-                props = next_data.get("props", {})
-                page_props = props.get("pageProps", {})
-                st.write("pageProps 키:", list(page_props.keys()))
-                if "initialState" in page_props:
-                    st.write("initialState 키:", list(page_props["initialState"].keys()))
-                # ────────────────────────────────────────────────
-
-                # __NEXT_DATA__ 안의 경로 탐색
-                props = next_data.get("props", {})
-                page_props = props.get("pageProps", {})
-
-                # 상품 데이터가 있는 위치 탐색 (구조가 달라질 수 있어 여러 경로 시도)
-                product_data = (
-                    page_props.get("initialState", {}).get("product", {}).get("A", {})
-                    or page_props.get("initialState", {}).get("productDetail", {})
-                    or page_props.get("product", {})
-                    or {}
-                )
-
-                product      = product_data.get("productInfoResponse", {}).get("product", {}) or product_data
-                review_stat  = product_data.get("productReviewInfoResponse", {}) or {}
-                channel_data = product_data.get("channelJoinStatusResponse", {}) or {}
-
-                product_name = (
-                    product.get("name", "")
-                    or product.get("productName", "")
-                )[:40]
-
-                price = (
-                    product.get("salePrice", 0)
-                    or product.get("discountedSalePrice", 0)
-                )
-
-                review_count = (
-                    review_stat.get("reviewCount", 0)
-                    or product.get("reviewCount", 0)
-                )
-
-                rating = round(float(
-                    review_stat.get("averageReviewScore", 0)
-                    or product.get("averageReviewScore", 0)
-                    or 0
-                ), 1)
-
-                wish_count = (
-                    product.get("wishCount", 0)
-                    or channel_data.get("wishCount", 0)
-                )
-
-                sales_count = product.get("totalSoldQuantity", 0) or 0
-
-                images = product.get("productImages", []) or []
-                img_count = len(images)
-
-                reg_date = (product.get("regDate", "") or "")[:10]
-
-                # 데이터가 제대로 왔는지 확인
-                if product_name:
-                    return {
-                        "상품명":   product_name,
-                        "가격":     price,
-                        "리뷰수":   review_count,
-                        "평점":     rating,
-                        "찜수":     wish_count,
-                        "판매량":   sales_count,
-                        "이미지수": img_count,
-                        "등록일":   reg_date or "확인불가",
-                        "url":      url,
-                    }
-
-            except Exception as e:
-                pass   # __NEXT_DATA__ 파싱 실패 시 Step 3으로 넘어감
-
-        # ── Step 3. __NEXT_DATA__ 실패 시 HTML에서 직접 추출 ──────
-        soup = BeautifulSoup(html, "html.parser")
-
-        # 상품명
-        product_name = ""
-        name_tag = soup.select_one("meta[property='og:title']")
-        if name_tag:
-            product_name = name_tag.get("content", "")[:40]
-
-        # 가격
-        price = 0
-        price_tag = soup.select_one("meta[property='product:price:amount']")
-        if price_tag:
-            try:
-                price = int(price_tag.get("content", "0").replace(",", ""))
-            except:
-                pass
-
-        # 리뷰수, 평점 — meta 태그에서 추출
-        review_count = 0
-        rating = 0.0
-        review_tag = soup.select_one("meta[property='product:rating:value']")
-        review_count_tag = soup.select_one("meta[property='product:rating:count']")
-        if review_tag:
-            try:
-                rating = round(float(review_tag.get("content", "0")), 1)
-            except:
-                pass
-        if review_count_tag:
-            try:
-                review_count = int(review_count_tag.get("content", "0"))
-            except:
-                pass
-
-        # 판매량 — 텍스트에서 추출
-        sales_count = 0
-        sales_match = re.search(r'(\d[\d,]+)\s*개\s*판매', html)
-        if sales_match:
-            try:
-                sales_count = int(sales_match.group(1).replace(",", ""))
-            except:
-                pass
-
-        # 찜수 — 텍스트에서 추출
-        wish_count = 0
-        wish_match = re.search(r'(\d[\d,]+)\s*명이\s*찜|찜\s*(\d[\d,]+)', html)
-        if wish_match:
-            try:
-                num = wish_match.group(1) or wish_match.group(2)
-                wish_count = int(num.replace(",", ""))
-            except:
-                pass
-
-        if not product_name:
-            return {
-                "error": "상품 데이터를 찾을 수 없습니다. 스마트스토어 URL인지 확인해주세요.",
-                "url": url
-            }
-
-        return {
-            "상품명":   product_name,
-            "가격":     price,
-            "리뷰수":   review_count,
-            "평점":     rating,
-            "찜수":     wish_count,
-            "판매량":   sales_count,
-            "이미지수": 0,
-            "등록일":   "확인불가",
-            "url":      url,
-        }
+        return {"error": "디버그 중 — 위 HTML 내용을 확인해주세요.", "url": url}
 
     except Exception as e:
         return {"error": str(e), "url": url}

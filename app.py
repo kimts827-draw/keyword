@@ -38,7 +38,7 @@ def get_base_keywords(seed_keyword):
     return resp.json().get('keywordList', []) if resp.status_code == 200 else []
 
 # ==========================================
-# [분석 및 크롤링 로직]
+# [분석 및 크롤링 로직 (황금 등급 추가)]
 # ==========================================
 def fetch_shop_data(item):
     rel_keyword = item['relKeyword']
@@ -68,8 +68,16 @@ def fetch_shop_data(item):
     elif any(word in rel_keyword for word in info_keywords): keyword_type = "블로그용 (정보성)"
     elif total_vol > 100 and (product_count / total_vol) < 0.1: keyword_type = "블로그용 (낮은 상품비율)"
     else: keyword_type = "쇼핑용"
+
+    # [신규 추가] 황금 키워드 등급 로직
+    grade = "일반"
+    if keyword_type == "쇼핑용":
+        if total_vol >= 500 and competition <= 1.0:
+            grade = "🥇 황금"
+        elif total_vol >= 300 and competition <= 2.0:
+            grade = "🟢 우수"
         
-    return {"성향": keyword_type, "연관키워드": rel_keyword, "쇼핑 카테고리": category,
+    return {"키워드 등급": grade, "성향": keyword_type, "연관키워드": rel_keyword, "쇼핑 카테고리": category,
             "월 검색량": total_vol, "상품수": product_count, "경쟁률(포화도)": competition, "쇼핑전환기회": conversion}
 
 def fetch_blog_data(item):
@@ -87,8 +95,15 @@ def fetch_blog_data(item):
         
     saturation = round(blog_total / total_vol, 2) if total_vol > 0 else 0
     opportunity = round((total_vol / (blog_total + 1)) * 100, 2)
+
+    # [신규 추가] 블로그 황금 키워드 로직
+    grade = "일반"
+    if total_vol >= 500 and saturation <= 2.0:
+        grade = "🥇 황금"
+    elif total_vol >= 300 and saturation <= 5.0:
+        grade = "🟢 우수"
     
-    return {"연관키워드": rel_keyword, "월간 검색량": total_vol, "블로그 누적 발행량": blog_total,
+    return {"키워드 등급": grade, "연관키워드": rel_keyword, "월간 검색량": total_vol, "블로그 누적 발행량": blog_total,
             "블로그 포화도(경쟁도)": saturation, "노출 기회(블루오션 지수)": opportunity}
 
 def analyze_top_blogs(target_keyword, total_vol):
@@ -161,6 +176,12 @@ with st.sidebar:
     st.header("⚙️ 필터 설정")
     blacklist_input = st.text_area("🚫 제외 단어", value="쿠팡, 다이소, 이케아, 삼성, 애플, 나이키, 스타벅스, 알리, 테무")
     blacklist = [word.strip() for word in blacklist_input.split(",") if word.strip()]
+    st.divider()
+    st.markdown("""
+    **🥇 황금 키워드 기준**
+    - **쇼핑:** 검색량 500이상 & 상품수 비율 1.0 이하
+    - **블로그:** 검색량 500이상 & 포화도 2.0 이하
+    """)
 
 st.title("⚡ 마케팅 통합 키워드 분석기")
 tab1, tab2, tab3 = st.tabs(["🛒 쇼핑 분석", "📝 블로그 분석", "📑 포스팅 가이드"])
@@ -192,8 +213,10 @@ with tab1:
                         status_text.text(f"[{idx}/{total_count}] 병렬 수집 중...")
                         time.sleep(0.02) 
                 
-                status_text.text("✅ 수집 완료!")
+                status_text.text("✅ 수집 완료! '키워드 등급' 컬럼에서 황금 키워드를 찾아보세요.")
                 df_shop = pd.DataFrame(results)
+                
+                # 황금 키워드가 눈에 띄도록 정렬 기능 지원 데이터프레임 출력
                 st.dataframe(df_shop, use_container_width=True)
                 
                 buffer = io.BytesIO()
@@ -228,7 +251,7 @@ with tab2:
                         status_text.text(f"[{idx}/{total_count}] 병렬 수집 중...")
                         time.sleep(0.02) 
                 
-                status_text.text("✅ 수집 완료!")
+                status_text.text("✅ 수집 완료! '키워드 등급' 컬럼에서 황금 키워드를 찾아보세요.")
                 df_blog = pd.DataFrame(results)
                 st.dataframe(df_blog, use_container_width=True)
                 

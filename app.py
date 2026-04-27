@@ -147,125 +147,149 @@ def fetch_blog_data(item):
 # [판매지수 분석]
 # ==========================================
 def fetch_product_data(url):
-    """
-    스마트스토어 상품 URL에서 판매지수 데이터 크롤링
-    """
+    import re
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://shopping.naver.com",
+        "Referer": "https://smartstore.naver.com",
+        "Accept": "application/json, text/plain, */*",
         "Accept-Language": "ko-KR,ko;q=0.9",
     }
 
     try:
-        resp = requests.get(url.strip(), headers=headers, timeout=10)
-        resp.encoding = "utf-8"
-        soup = BeautifulSoup(resp.text, "html.parser")
+        url = url.strip()
 
-        # ── 상품명 ──────────────────────────────────────────────
-        product_name = ""
-        name_tag = (
-            soup.select_one("meta[property='og:title']")
-            or soup.select_one(".prd_name")
-            or soup.select_one("h3.prod_name")
+        # ── 상품번호 추출 ─────────────────────────────────────
+        # 형태 1: /products/1234567890
+        # 형태 2: ?productNo=1234567890
+        product_no = None
+
+        match1 = re.search(r'/products/(\d+)', url)
+        match2 = re.search(r'productNo=(\d+)', url)
+        if match1:
+            product_no = match1.group(1)
+        elif match2:
+            product_no = match2.group(1)
+
+        # 스토어 slug 추출 (smartstore.naver.com/slug/products/...)
+        store_slug = ""
+        slug_match = re.search(
+            r'smartstore\.naver\.com/([^/?#]+)', url
         )
-        if name_tag:
-            product_name = name_tag.get("content", "") or name_tag.get_text()
-        product_name = product_name.strip()[:40]
+        if slug_match:
+            store_slug = slug_match.group(1)
 
-        # ── 가격 ────────────────────────────────────────────────
-        price = 0
-        price_tag = (
-            soup.select_one("meta[property='product:price:amount']")
-            or soup.select_one("._3oj5SHB7lh")   # 스마트스토어 가격
-            or soup.select_one(".price_num")
+        if not product_no:
+            # 상품번호가 URL에 없으면 페이지 HTML에서 추출 시도
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.encoding = "utf-8"
+            # __NEXT_DATA__ 안에 상품번호 포함되어 있음
+            match3 = re.search(r'"nvMid"\s*:\s*"?(\d+)"?', resp.text)
+            match4 = re.search(r'"productNo"\s*:\s*(\d+)', resp.text)
+            if match3:
+                product_no = match3.group(1)
+            elif match4:
+                product_no = match4.group(1)
+
+        if not product_no:
+            return {"error": "상품번호를 찾을 수 없습니다. URL을 확인해주세요.", "url": url}
+
+        # ── 내부 JSON API 호출 ────────────────────────────────
+        api_url = f"https://smartstore.naver.com/i/v1/products/{product_no}"
+        api_resp = requests.get(api_url, headers=headers, timeout=10)
+
+        if api_resp.status_code != 200:
+            # 폴백: 다른 API 엔드포인트 시도
+            api_url2 = (
+                f"https://shopping.naver.com/catalog/api/products/nvMid/{product_no}"
+            )
+            api_resp = requests.get(api_url2, headers=headers, timeout=10)
+
+        if api_resp.status_code != 200:
+            return {
+                "error": f"API 호출 실패 (status: {api_resp.status_code})",
+                "url": url
+            }
+
+        data = api_resp.json()
+
+        # ── JSON에서 데이터 추출 ──────────────────────────────
+        # 스마트스토어 API 응답 구조
+        product     = data.get("product", data)
+        channel     = data.get("channel", {})
+        sale_stat   = data.get("saleStat", {})
+        review_stat = data.get("reviewStat", {})
+
+        # 상품명
+        product_name = (
+            product.get("name", "")
+            or product.get("productName", "")
+            or data.get("name", "")
+        )[:40]
+
+        # 가격
+        price = (
+            product.get("salePrice", 0)
+            or product.get("discountedSalePrice", 0)
+            or data.get("salePrice", 0)
         )
-        if price_tag:
-            price_text = price_tag.get("content", "") or price_tag.get_text()
-            price = int("".join(filter(str.isdigit, price_text)) or 0)
 
-        # ── 리뷰 수 ─────────────────────────────────────────────
-        review_count = 0
-        review_selectors = [
-            "._2FXNMst_ak",           # 스마트스토어 리뷰수
-            ".reviewCount",
-            "._3_6Rjkomg6",
-            "em._1asBsM_C6b",
-            ".count",
-        ]
-        for sel in review_selectors:
-            tag = soup.select_one(sel)
-            if tag:
-                num = "".join(filter(str.isdigit, tag.get_text()))
-                if num:
-                    review_count = int(num)
-                    break
+        # 리뷰 수
+        review_count = (
+            review_stat.get("reviewCount", 0)
+            or data.get("reviewCount", 0)
+            or product.get("reviewCount", 0)
+        )
 
-        # ── 평점 ────────────────────────────────────────────────
-        rating = 0.0
-        rating_selectors = [
-            "._3_6Rjkomg6",
-            ".ratingValue",
-            "._1RzD-UYOKA",
-            "meta[property='product:rating:value']",
-        ]
-        for sel in rating_selectors:
-            tag = soup.select_one(sel)
-            if tag:
-                rating_text = tag.get("content", "") or tag.get_text()
-                try:
-                    rating = float(
-                        "".join(c for c in rating_text if c.isdigit() or c == ".")
-                    )
-                    if rating > 5:
-                        rating = 0.0
-                    if rating > 0:
-                        break
-                except:
-                    continue
+        # 평점
+        rating = (
+            review_stat.get("averageReviewScore", 0.0)
+            or data.get("averageReviewScore", 0.0)
+            or product.get("averageReviewScore", 0.0)
+        )
+        try:
+            rating = round(float(rating), 1)
+        except:
+            rating = 0.0
 
-        # ── 찜 수 ───────────────────────────────────────────────
-        wish_count = 0
-        wish_selectors = [
-            "._3_6Rjkomg6",
-            ".wishCount",
-            "._2FXNMst_ak",
-            "._1wzHtAMBh5",
-        ]
-        for sel in wish_selectors:
-            for tag in soup.select(sel):
-                text = tag.get_text()
-                if "찜" in text or "관심" in text:
-                    num = "".join(filter(str.isdigit, text))
-                    if num:
-                        wish_count = int(num)
-                        break
+        # 찜 수
+        wish_count = (
+            data.get("wishCount", 0)
+            or product.get("wishCount", 0)
+            or channel.get("wishCount", 0)
+        )
 
-        # ── 판매량 (공개된 경우만) ───────────────────────────────
-        sales_count = 0
-        for tag in soup.find_all(string=True):
-            if "개 판매" in tag or "명 구매" in tag:
-                num = "".join(filter(str.isdigit, tag.split("개")[0].split("명")[0]))
-                if num:
-                    sales_count = int(num)
-                    break
+        # 판매량 (공개된 경우만)
+        sales_count = (
+            sale_stat.get("soldQuantity", 0)
+            or data.get("soldQuantity", 0)
+            or product.get("totalSoldQuantity", 0)
+        )
 
-        # ── 상품 이미지 수 (대표+서브) ───────────────────────────
-        img_count = len(soup.select(
-            "._3_6Rjkomg6 img, .thumbnail_list img, ._2ygj7zBVwi img"
-        ))
+        # 이미지 수
+        images = (
+            product.get("productImages", [])
+            or data.get("productImages", [])
+            or []
+        )
+        img_count = len(images)
 
-        # ── 등록일 ──────────────────────────────────────────────
-        reg_date = ""
-        for tag in soup.find_all(string=True):
-            if "등록일" in tag or "판매시작" in tag:
-                match = re.search(r"\d{4}[.\-]\d{2}[.\-]\d{2}", tag)
-                if match:
-                    reg_date = match.group()
-                    break
+        # 등록일
+        reg_date = (
+            product.get("regDate", "")
+            or data.get("regDate", "")
+            or ""
+        )
+        if reg_date:
+            reg_date = reg_date[:10]
+
+        # ── 디버그용: 원본 JSON 키 확인 ──────────────────────
+        # 데이터가 0으로 나올 경우 아래 주석을 풀어서 실제 키 구조 확인
+        # st.write(data)
 
         return {
             "상품명":   product_name or "상품명 불러오기 실패",
@@ -276,11 +300,12 @@ def fetch_product_data(url):
             "판매량":   sales_count,
             "이미지수": img_count,
             "등록일":   reg_date or "확인불가",
-            "url":      url.strip(),
+            "상품번호": product_no,
+            "url":      url,
         }
 
     except Exception as e:
-        return {"error": str(e), "url": url.strip()}
+        return {"error": str(e), "url": url}
 
 
 def calculate_score(data):

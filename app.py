@@ -34,14 +34,18 @@ def get_base_keywords(seed_keyword):
     timestamp = str(round(time.time() * 1000))
     signature = generate_signature(timestamp, "GET", path, SECRET_KEY)
     headers = {"X-Timestamp": timestamp, "X-API-KEY": API_KEY, "X-Customer": str(CUSTOMER_ID), "X-Signature": signature}
-    params = {"hintKeywords": seed_keyword, "showDetail": 1}
+    
+    # [수정됨] 띄어쓰기 및 특수문자로 인한 400 에러 방지를 위해 공백 강제 제거
+    clean_keyword = seed_keyword.replace(" ", "").strip()
+    
+    params = {"hintKeywords": clean_keyword, "showDetail": 1}
     
     resp = requests.get(base_url + path, params=params, headers=headers)
     
-    # [수정됨] API 통신 실패 시 침묵하지 않고 명확한 에러 메시지 출력
+    # [수정됨] 에러 발생 시 네이버 서버가 보낸 '진짜 거절 사유'를 화면에 출력
     if resp.status_code != 200:
         st.error(f"🚨 검색광고 API 연동 실패 (에러코드: {resp.status_code})")
-        st.info("해결방법: 코드 상단의 CUSTOMER_ID, API_KEY, SECRET_KEY가 정확한지 확인하세요.")
+        st.info(f"네이버 서버 응답 메시지: {resp.text}")
         return None
         
     return resp.json().get('keywordList', [])

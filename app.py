@@ -149,32 +149,130 @@ def fetch_blog_data(item):
 # ==========================================
 def fetch_product_data(url):
     url = url.strip()
-    session = requests.Session()
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-    }
 
     try:
-        page_resp = session.get(url, headers=headers, timeout=10)
-        page_resp.encoding = "utf-8"
-        html = page_resp.text
+        # ── Step 1. URL에서 상품번호 추출 ─────────────────────
+        product_no = None
+        store_slug = ""
 
-        # ── 디버그: 실제로 받은 HTML 앞부분 출력 ──────────────
-        st.warning(f"HTTP 상태코드: {page_resp.status_code}")
-        st.warning(f"최종 URL (리다이렉트 확인): {page_resp.url}")
-        st.code(html[:1000], language="html")
-        # ──────────────────────────────────────────────────────
+        match1 = re.search(r'/products/(\d+)', url)
+        match2 = re.search(r'productNo=(\d+)', url)
+        slug_match = re.search(r'smartstore\.naver\.com/([^/?#]+)', url)
 
-        return {"error": "디버그 중 — 위 HTML 내용을 확인해주세요.", "url": url}
+        if match1:
+            product_no = match1.group(1)
+        elif match2:
+            product_no = match2.group(1)
+        if slug_match:
+            store_slug = slug_match.group(1)
+
+        if not product_no:
+            return {
+                "error": "URL에서 상품번호를 찾을 수 없습니다. smartstore.naver.com URL인지 확인해주세요.",
+                "url": url
+            }
+
+        # ── Step 2. 네이버 쇼핑 검색 API로 상품 조회 ──────────
+        # 상품번호로 직접 검색
+        shop_headers = {
+            "X-Naver-Client-Id": CLIENT_ID,
+            "X-Naver-Client-Secret": CLIENT_SECRET,
+        }
+
+        # 상품번호로 검색 시도
+        search_query = product_no
+        shop_resp = requests.get(
+            "https://openapi.naver.com/v1/search/shop.json",
+            params={"query": search_query, "display": 5},
+            headers=shop_headers,
+            timeout=5,
+        )
+
+        if shop_resp.status_code != 200:
+            return {
+                "error": f"쇼핑 API 오류: {shop_resp.status_code}",
+                "url": url
+            }
+
+        items = shop_resp.json().get("items", [])
+
+        # 상품번호가 URL에 포함된 상품 찾기
+        matched_item = None
+        for item in items:
+            item_link = item.get("link", "") + item.get("productId", "")
+            if product_no in item.get("link", "") or product_no in item.get("productId", ""):
+                matched_item = item
+                break
+
+        # 못 찾으면 스토어 slug로 재검색
+        if not matched_item and store_slug:
+            shop_resp2 = requests.get(
+                "https://openapi.naver.com/v1/search/shop.json",
+                params={"query": store_slug, "display": 20},
+                headers=shop_headers,
+                timeout=5,
+            )
+            if shop_resp2.status_code == 200:
+                for item in shop_resp2.json().get("items", []):
+                    if product_no in item.get("link", ""):
+                        matched_item = item
+                        break
+
+        # 그래도 못 찾으면 첫 번째 결과 사용
+        if not matched_item and items:
+            matched_item = items[0]
+
+        if not matched_item:
+            return {
+                "error": "해당 상품을 쇼핑 API에서 찾을 수 없습니다. 상품명으로 직접 검색해보세요.",
+                "url": url
+            }
+
+        # ── Step 3. API 응답에서 데이터 추출 ──────────────────
+        from bs4 import BeautifulSoup as BS
+
+        # 상품명 (HTML 태그 제거)
+        raw_title = matched_item.get("title", "")
+        product_name = BS(raw_title, "html.parser").get_text()[:40]
+
+        # 가격
+        price = int(matched_item.get("lprice", 0) or 0)
+
+        # 리뷰수
+        review_count = int(matched_item.get("reviewCount", 0) or 0)
+
+        # 평점
+        try:
+            rating = round(float(matched_item.get("score", 0) or 0), 1)
+        except:
+            rating = 0.0
+
+        # 카테고리
+        categories = [
+            matched_item.get("category1", ""),
+            matched_item.get("category2", ""),
+            matched_item.get("category3", ""),
+            matched_item.get("category4", ""),
+        ]
+        category = " > ".join([c for c in categories if c])
+
+        # 브랜드/판매처
+        brand = matched_item.get("brand", "") or matched_item.get("mallName", "")
+
+        return {
+            "상품명":   product_name or "상품명 없음",
+            "가격":     price,
+            "리뷰수":   review_count,
+            "평점":     rating,
+            "찜수":     0,        # 공식 API 미제공
+            "판매량":   0,        # 공식 API 미제공
+            "이미지수": 0,        # 공식 API 미제공
+            "카테고리": category,
+            "브랜드":   brand,
+            "등록일":   "확인불가",
+            "상품번호": product_no,
+            "url":      url,
+        }
 
     except Exception as e:
         return {"error": str(e), "url": url}
@@ -204,30 +302,14 @@ def calculate_score(data):
     elif rt >= 3.5:    scores["평점"] = 5
     else:              scores["평점"] = 0
 
-    # 찜 수 (20점)
-    w = data.get("찜수", 0)
-    if w >= 5000:      scores["찜"] = 20
-    elif w >= 1000:    scores["찜"] = 16
-    elif w >= 500:     scores["찜"] = 12
-    elif w >= 100:     scores["찜"] = 8
-    elif w >= 10:      scores["찜"] = 4
-    else:              scores["찜"] = 0
+    # 찜수 — API 미제공, 점수 제외
+    scores["찜"] = 0
 
-    # 판매량 (20점) — 비공개면 0점 처리
-    s = data.get("판매량", 0)
-    if s >= 10000:     scores["판매량"] = 20
-    elif s >= 5000:    scores["판매량"] = 16
-    elif s >= 1000:    scores["판매량"] = 12
-    elif s >= 500:     scores["판매량"] = 8
-    elif s >= 100:     scores["판매량"] = 4
-    else:              scores["판매량"] = 0
+    # 판매량 — API 미제공, 점수 제외
+    scores["판매량"] = 0
 
-    # 이미지 수 (10점)
-    img = data.get("이미지수", 0)
-    if img >= 10:      scores["이미지"] = 10
-    elif img >= 6:     scores["이미지"] = 7
-    elif img >= 3:     scores["이미지"] = 4
-    else:              scores["이미지"] = 0
+    # 이미지 수 — API 미제공, 점수 제외
+    scores["이미지"] = 0
 
     scores["총점"] = sum(v for k, v in scores.items() if k != "총점")
     return scores
@@ -782,12 +864,10 @@ with tab4:
         st.markdown("#### 📋 항목별 점수 비교")
 
         ITEMS = [
-            ("리뷰",  30, "리뷰수",  "개"),
-            ("평점",  20, "평점",    "점"),
-            ("찜",    20, "찜수",    "개"),
-            ("판매량",20, "판매량",  "개"),
-            ("이미지",10, "이미지수","개"),
+            ("리뷰",  30, "리뷰수", "개"),
+            ("평점",  20, "평점",   "점"),
         ]
+        st.caption("⚠️ 찜수·판매량·이미지는 네이버 공식 API 미제공 항목입니다.")
 
         for label, max_score, data_key, unit in ITEMS:
             my_s    = my_score[label]

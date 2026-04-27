@@ -153,31 +153,55 @@ def analyze_top_blogs(target_keyword, total_vol):
         
     items = resp.json().get('items', [])
     metrics = {"text_len": 0, "img": 0, "kw": 0, "tag": 0, "title": 0, "count": 0}
-    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     
     for item in items:
         try:
-            res = requests.get(item['link'], headers=req_headers, timeout=5)
+            # 1. 블로그 주소 변환 (모바일 주소가 섞여있을 경우 대비)
+            link = item['link'].replace("blog.naver.com", "m.blog.naver.com")
+            res = requests.get(link, headers=req_headers, timeout=5)
             soup = BeautifulSoup(res.text, "html.parser")
-            iframe = soup.select_one("iframe#mainFrame")
-            if iframe:
-                res_real = requests.get("https://blog.naver.com" + iframe["src"], headers=req_headers, timeout=5)
-                s = BeautifulSoup(res_real.text, "html.parser")
-                content = s.get_text()
-                metrics["text_len"] += len(content.replace(" ", ""))
-                metrics["img"] += len(s.find_all("img"))
-                metrics["kw"] += content.count(target_keyword)
-                metrics["tag"] += len(s.select(".blog2_post_tag_area a, .item_tag")) 
+            
+            # 2. 본문 영역 정밀 타격 (스마트에디터 ONE 전용 클래스 추출)
+            # 모바일 버전 페이지가 구조가 단순하여 더 정확한 데이터 추출이 가능합니다.
+            content_area = soup.select_one(".se-main-container")
+            
+            if content_area:
+                # 텍스트 추출 (불필요한 공백 제거 및 정제)
+                content_text = content_area.get_text(separator=' ', strip=True)
+                clean_text = content_text.replace(" ", "")
+                
+                metrics["text_len"] += len(clean_text)
+                
+                # 본문 내 이미지 개수 (기본 이미지 및 스티커 제외 필터링)
+                # se-image-resource 클래스를 가진 이미지만 카운트
+                imgs = content_area.select(".se-image-resource, .se-inline-image-resource")
+                metrics["img"] += len(imgs)
+                
+                # 본문 내 키워드 반복 횟수
+                metrics["kw"] += content_text.count(target_keyword)
+                
+                # 태그 추출
+                tags = soup.select(".item_tag, .tag_item")
+                metrics["tag"] += len(tags)
+                
                 metrics["title"] += len(BeautifulSoup(item['title'], "html.parser").get_text().replace(" ", ""))
                 metrics["count"] += 1
-        except: continue
+        except Exception as e:
+            continue
 
     if metrics["count"] == 0: return None
+    
     expected_daily = int((total_vol / 30) * 0.1)
     
-    return {"text": int(metrics["text_len"]/metrics["count"]), "img": int(metrics["img"]/metrics["count"]),
-            "kw": int(metrics["kw"]/metrics["count"]), "tag": int(metrics["tag"]/metrics["count"]),
-            "title": int(metrics["title"]/len(items)), "visitors": expected_daily}
+    return {
+        "text": int(metrics["text_len"]/metrics["count"]), 
+        "img": int(metrics["img"]/metrics["count"]),
+        "kw": int(metrics["kw"]/metrics["count"]), 
+        "tag": int(metrics["tag"]/metrics["count"]),
+        "title": int(metrics["title"]/len(items)), 
+        "visitors": expected_daily
+    }
 
 # ==========================================
 # [기기별 사용자 비율 컴포넌트]

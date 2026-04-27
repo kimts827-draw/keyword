@@ -261,18 +261,65 @@ def analyze_top_blogs(urls_input, target_keyword, total_vol):
             else:
                 title_text = ""
 
+            # 소제목 수 (h2, h3, h4 태그)
+            headings = len(content_area.select("h2, h3, h4, .se-heading"))
+
+            # 문단 수
+            paragraphs = len(content_area.select(
+                "p, .se-text-paragraph, .se-module-text"
+            ))
+
+            # 내부 링크 수 (blog.naver.com)
+            internal_links = len([
+                a for a in content_area.find_all("a", href=True)
+                if "blog.naver.com" in a["href"]
+            ])
+
+            # 외부 링크 수
+            external_links = len([
+                a for a in content_area.find_all("a", href=True)
+                if "blog.naver.com" not in a["href"]
+                and a["href"].startswith("http")
+            ])
+
+            # 동영상 포함 여부
+            has_video = bool(
+                content_area.select_one(
+                    "iframe, video, .se-module-video, embed"
+                )
+            )
+
+            # 발행일 추출
+            pub_date = ""
+            date_tag = (
+                soup.select_one("meta[property='article:published_time']")
+                or soup.select_one(".se-publishDate")
+                or soup.select_one(".blog_date")
+            )
+            if date_tag:
+                pub_date = (
+                    date_tag.get("content", "") or date_tag.get_text()
+                ).strip()[:10]
+
             return {
-                "text_len":  len(clean_text),
-                "img":       count_real_images(content_area),
-                "kw":        content_area.get_text().count(target_keyword),
-                "tag":       len(soup.select(".item_tag, .tag_item, .tag_list a, ._postTagList a")),
-                "title_len": len(title_text.replace(" ", "")),
-                "원본_url":  link,
-                "글자수":    len(clean_text),
-                "이미지수":  count_real_images(content_area),
-                "키워드반복": content_area.get_text().count(target_keyword),
-                "해시태그":  len(soup.select(".item_tag, .tag_item, .tag_list a, ._postTagList a")),
-                "제목길이":  len(title_text.replace(" ", "")),
+                "text_len":       len(clean_text),
+                "img":            count_real_images(content_area),
+                "kw":             content_area.get_text().count(target_keyword),
+                "headings":       headings,
+                "paragraphs":     paragraphs,
+                "internal_links": internal_links,
+                "external_links": external_links,
+                "has_video":      has_video,
+                "원본_url":       link,
+                "글자수":         len(clean_text),
+                "이미지수":       count_real_images(content_area),
+                "키워드반복":     content_area.get_text().count(target_keyword),
+                "소제목수":       headings,
+                "문단수":         paragraphs,
+                "내부링크":       internal_links,
+                "외부링크":       external_links,
+                "동영상":         "✅" if has_video else "❌",
+                "발행일":         pub_date if pub_date else "확인불가",
             }, None
 
         except Exception as e:
@@ -293,7 +340,11 @@ def analyze_top_blogs(urls_input, target_keyword, total_vol):
         return None, [], "URL은 최대 10개까지 입력 가능합니다."
 
     # 병렬 크롤링
-    metrics = {"text_len": [], "img": [], "kw": [], "tag": [], "title_len": []}
+    metrics = {
+        "text_len": [], "img": [], "kw": [],
+        "headings": [], "paragraphs": [],
+        "internal_links": [], "external_links": [],
+    }
     failed_urls = []
     per_post_data = []   # 포스팅별 개별 데이터 (테이블용)
 
@@ -307,15 +358,21 @@ def analyze_top_blogs(urls_input, target_keyword, total_vol):
             metrics["text_len"].append(result["text_len"])
             metrics["img"].append(result["img"])
             metrics["kw"].append(result["kw"])
-            metrics["tag"].append(result["tag"])
-            metrics["title_len"].append(result["title_len"])
+            metrics["headings"].append(result["headings"])
+            metrics["paragraphs"].append(result["paragraphs"])
+            metrics["internal_links"].append(result["internal_links"])
+            metrics["external_links"].append(result["external_links"])
             per_post_data.append({
                 "URL":      result["원본_url"],
                 "글자수":   f"{result['글자수']:,}자",
                 "이미지":   f"{result['이미지수']}개",
                 "키워드반복": f"{result['키워드반복']}회",
-                "해시태그": f"{result['해시태그']}개",
-                "제목길이": f"{result['제목길이']}자",
+                "소제목":   f"{result['소제목수']}개",
+                "문단수":   f"{result['문단수']}개",
+                "내부링크": f"{result['내부링크']}개",
+                "외부링크": f"{result['외부링크']}개",
+                "동영상":   result["동영상"],
+                "발행일":   result["발행일"],
             })
 
     if not metrics["text_len"]:
@@ -324,14 +381,14 @@ def analyze_top_blogs(urls_input, target_keyword, total_vol):
     visitors = estimate_daily_visitors(total_vol)
 
     summary = {
-        "text":            trim_mean(metrics["text_len"]),
-        "img":             trim_mean(metrics["img"]),
-        "kw":              trim_mean(metrics["kw"]),
-        "tag":             trim_mean(metrics["tag"]),
-        "title":           trim_mean(metrics["title_len"]),
-        "visitors":        visitors["3위_예상"],
-        "visitors_detail": visitors,
-        "sample_count":    len(metrics["text_len"]),
+        "text":           trim_mean(metrics["text_len"]),
+        "img":            trim_mean(metrics["img"]),
+        "kw":             trim_mean(metrics["kw"]),
+        "headings":       trim_mean(metrics["headings"]),
+        "paragraphs":     trim_mean(metrics["paragraphs"]),
+        "internal_links": trim_mean(metrics["internal_links"]),
+        "external_links": trim_mean(metrics["external_links"]),
+        "sample_count":   len(metrics["text_len"]),
     }
 
     return summary, failed_urls, per_post_data
@@ -536,20 +593,16 @@ with tab3:
         c1, c2, c3 = st.columns(3)
         c4, c5, c6 = st.columns(3)
 
-        c1.metric("권장 글자 수",      f"{res['text']:,}자")
-        c2.metric("평균 이미지",        f"{res['img']}개")
-        c3.metric("키워드 반복",        f"{res['kw']}회")
-        c4.metric("평균 해시태그",      f"{res['tag']}개")
-        c5.metric("제목 길이",          f"{res['title']}자")
-        c6.metric(
-            "예상 일 방문자 (3위 기준)",
-            f"{res['visitors']}명",
-            help=(
-                f"1위: {res['visitors_detail']['1위_예상']}명 / "
-                f"3위: {res['visitors_detail']['3위_예상']}명 / "
-                f"5위: {res['visitors_detail']['5위_예상']}명"
-            )
-        )
+        c1.metric("권장 글자 수",  f"{res['text']:,}자")
+        c2.metric("평균 이미지",   f"{res['img']}개")
+        c3.metric("키워드 반복",   f"{res['kw']}회")
+        c4.metric("소제목 수",     f"{res['headings']}개",
+                  help="h2~h4 태그 기준. 글 구조화 정도를 나타냅니다.")
+        c5.metric("문단 수",       f"{res['paragraphs']}개",
+                  help="단락 수. 높을수록 읽기 쉬운 구조입니다.")
+        c6.metric("외부 링크 수",  f"{res['external_links']}개",
+                  help="출처·참고자료 링크 수. 신뢰도 지표로 활용됩니다.")
+        
 
         # ── 포스팅별 개별 데이터 테이블 ───────────────────────────
         st.divider()

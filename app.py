@@ -6,6 +6,7 @@ import hmac
 import base64
 import datetime
 import io
+import re
 import streamlit as st
 import concurrent.futures
 from bs4 import BeautifulSoup
@@ -142,6 +143,197 @@ def fetch_blog_data(item):
     return {"키워드 등급": grade, "연관키워드": rel_keyword, "월간 검색량": total_vol, "블로그 누적 발행량": blog_total,
             "블로그 포화도(경쟁도)": saturation, "노출 기회(블루오션 지수)": opportunity}
 
+# ==========================================
+# [판매지수 분석]
+# ==========================================
+def fetch_product_data(url):
+    """
+    스마트스토어 상품 URL에서 판매지수 데이터 크롤링
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://shopping.naver.com",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    }
+
+    try:
+        resp = requests.get(url.strip(), headers=headers, timeout=10)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # ── 상품명 ──────────────────────────────────────────────
+        product_name = ""
+        name_tag = (
+            soup.select_one("meta[property='og:title']")
+            or soup.select_one(".prd_name")
+            or soup.select_one("h3.prod_name")
+        )
+        if name_tag:
+            product_name = name_tag.get("content", "") or name_tag.get_text()
+        product_name = product_name.strip()[:40]
+
+        # ── 가격 ────────────────────────────────────────────────
+        price = 0
+        price_tag = (
+            soup.select_one("meta[property='product:price:amount']")
+            or soup.select_one("._3oj5SHB7lh")   # 스마트스토어 가격
+            or soup.select_one(".price_num")
+        )
+        if price_tag:
+            price_text = price_tag.get("content", "") or price_tag.get_text()
+            price = int("".join(filter(str.isdigit, price_text)) or 0)
+
+        # ── 리뷰 수 ─────────────────────────────────────────────
+        review_count = 0
+        review_selectors = [
+            "._2FXNMst_ak",           # 스마트스토어 리뷰수
+            ".reviewCount",
+            "._3_6Rjkomg6",
+            "em._1asBsM_C6b",
+            ".count",
+        ]
+        for sel in review_selectors:
+            tag = soup.select_one(sel)
+            if tag:
+                num = "".join(filter(str.isdigit, tag.get_text()))
+                if num:
+                    review_count = int(num)
+                    break
+
+        # ── 평점 ────────────────────────────────────────────────
+        rating = 0.0
+        rating_selectors = [
+            "._3_6Rjkomg6",
+            ".ratingValue",
+            "._1RzD-UYOKA",
+            "meta[property='product:rating:value']",
+        ]
+        for sel in rating_selectors:
+            tag = soup.select_one(sel)
+            if tag:
+                rating_text = tag.get("content", "") or tag.get_text()
+                try:
+                    rating = float(
+                        "".join(c for c in rating_text if c.isdigit() or c == ".")
+                    )
+                    if rating > 5:
+                        rating = 0.0
+                    if rating > 0:
+                        break
+                except:
+                    continue
+
+        # ── 찜 수 ───────────────────────────────────────────────
+        wish_count = 0
+        wish_selectors = [
+            "._3_6Rjkomg6",
+            ".wishCount",
+            "._2FXNMst_ak",
+            "._1wzHtAMBh5",
+        ]
+        for sel in wish_selectors:
+            for tag in soup.select(sel):
+                text = tag.get_text()
+                if "찜" in text or "관심" in text:
+                    num = "".join(filter(str.isdigit, text))
+                    if num:
+                        wish_count = int(num)
+                        break
+
+        # ── 판매량 (공개된 경우만) ───────────────────────────────
+        sales_count = 0
+        for tag in soup.find_all(string=True):
+            if "개 판매" in tag or "명 구매" in tag:
+                num = "".join(filter(str.isdigit, tag.split("개")[0].split("명")[0]))
+                if num:
+                    sales_count = int(num)
+                    break
+
+        # ── 상품 이미지 수 (대표+서브) ───────────────────────────
+        img_count = len(soup.select(
+            "._3_6Rjkomg6 img, .thumbnail_list img, ._2ygj7zBVwi img"
+        ))
+
+        # ── 등록일 ──────────────────────────────────────────────
+        reg_date = ""
+        for tag in soup.find_all(string=True):
+            if "등록일" in tag or "판매시작" in tag:
+                match = re.search(r"\d{4}[.\-]\d{2}[.\-]\d{2}", tag)
+                if match:
+                    reg_date = match.group()
+                    break
+
+        return {
+            "상품명":   product_name or "상품명 불러오기 실패",
+            "가격":     price,
+            "리뷰수":   review_count,
+            "평점":     rating,
+            "찜수":     wish_count,
+            "판매량":   sales_count,
+            "이미지수": img_count,
+            "등록일":   reg_date or "확인불가",
+            "url":      url.strip(),
+        }
+
+    except Exception as e:
+        return {"error": str(e), "url": url.strip()}
+
+
+def calculate_score(data):
+    """
+    수집된 데이터를 100점 만점으로 점수화
+    """
+    scores = {}
+
+    # 리뷰 수 (30점)
+    r = data.get("리뷰수", 0)
+    if r >= 1000:      scores["리뷰"] = 30
+    elif r >= 500:     scores["리뷰"] = 25
+    elif r >= 200:     scores["리뷰"] = 20
+    elif r >= 100:     scores["리뷰"] = 15
+    elif r >= 50:      scores["리뷰"] = 10
+    elif r >= 10:      scores["리뷰"] = 5
+    else:              scores["리뷰"] = 0
+
+    # 평점 (20점)
+    rt = data.get("평점", 0)
+    if rt >= 4.8:      scores["평점"] = 20
+    elif rt >= 4.5:    scores["평점"] = 16
+    elif rt >= 4.0:    scores["평점"] = 10
+    elif rt >= 3.5:    scores["평점"] = 5
+    else:              scores["평점"] = 0
+
+    # 찜 수 (20점)
+    w = data.get("찜수", 0)
+    if w >= 5000:      scores["찜"] = 20
+    elif w >= 1000:    scores["찜"] = 16
+    elif w >= 500:     scores["찜"] = 12
+    elif w >= 100:     scores["찜"] = 8
+    elif w >= 10:      scores["찜"] = 4
+    else:              scores["찜"] = 0
+
+    # 판매량 (20점) — 비공개면 0점 처리
+    s = data.get("판매량", 0)
+    if s >= 10000:     scores["판매량"] = 20
+    elif s >= 5000:    scores["판매량"] = 16
+    elif s >= 1000:    scores["판매량"] = 12
+    elif s >= 500:     scores["판매량"] = 8
+    elif s >= 100:     scores["판매량"] = 4
+    else:              scores["판매량"] = 0
+
+    # 이미지 수 (10점)
+    img = data.get("이미지수", 0)
+    if img >= 10:      scores["이미지"] = 10
+    elif img >= 6:     scores["이미지"] = 7
+    elif img >= 3:     scores["이미지"] = 4
+    else:              scores["이미지"] = 0
+
+    scores["총점"] = sum(v for k, v in scores.items() if k != "총점")
+    return scores
 
 def analyze_top_blogs(urls_input, target_keyword, total_vol):
     """
@@ -438,7 +630,7 @@ with st.sidebar:
     """)
 
 st.title("⚡ 마케팅 통합 키워드 분석기")
-tab1, tab2, tab3 = st.tabs(["🛒 쇼핑 분석", "📝 블로그 분석", "📑 포스팅 가이드"])
+tab1, tab2, tab3, tab4 = st.tabs(["🛒 쇼핑 분석", "📝 블로그 분석", "📑 포스팅 가이드", "📊 판매지수 비교"])
 
 with tab1:
     s_keyword = st.text_input("쇼핑 키워드:", key="s_in", placeholder="예: 차량용방향제")
@@ -618,3 +810,144 @@ with tab3:
             with st.expander(f"⚠️ 분석 실패 {len(failed_urls)}건 (클릭해서 확인)"):
                 st.dataframe(pd.DataFrame(failed_urls), use_container_width=True)
                 st.caption("실패한 포스팅은 JS 렌더링 방식이거나 네이버가 접근을 차단했을 수 있습니다.")
+
+with tab4:
+    st.subheader("📊 판매지수 비교 분석")
+    st.caption("스마트스토어 상품 URL을 입력하면 판매지수를 점수화해서 비교합니다.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("#### 🔵 내 상품")
+        my_url = st.text_input(
+            "내 상품 URL",
+            placeholder="https://smartstore.naver.com/...",
+            key="my_url"
+        )
+    with col_b:
+        st.markdown("#### 🔴 경쟁 상품")
+        comp_url = st.text_input(
+            "경쟁 상품 URL",
+            placeholder="https://smartstore.naver.com/...",
+            key="comp_url"
+        )
+
+    if st.button("판매지수 분석 시작", key="score_bt"):
+        if not my_url.strip() or not comp_url.strip():
+            st.warning("두 상품의 URL을 모두 입력해주세요.")
+            st.stop()
+
+        with st.spinner("상품 데이터 수집 중..."):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(fetch_product_data, my_url),
+                    executor.submit(fetch_product_data, comp_url),
+                ]
+                my_data, comp_data = [f.result() for f in futures]
+
+        # 오류 체크
+        if "error" in my_data:
+            st.error(f"❌ 내 상품 수집 실패: {my_data['error']}")
+            st.stop()
+        if "error" in comp_data:
+            st.error(f"❌ 경쟁 상품 수집 실패: {comp_data['error']}")
+            st.stop()
+
+        my_score   = calculate_score(my_data)
+        comp_score = calculate_score(comp_data)
+
+        # ── 총점 비교 ─────────────────────────────────────────
+        st.divider()
+        c1, c2 = st.columns(2)
+
+        def score_color(score):
+            if score >= 80: return "🟢"
+            elif score >= 60: return "🟡"
+            elif score >= 40: return "🟠"
+            else: return "🔴"
+
+        with c1:
+            st.markdown(f"### 🔵 {my_data['상품명']}")
+            st.metric(
+                "총점",
+                f"{score_color(my_score['총점'])} {my_score['총점']}점 / 100점",
+            )
+        with c2:
+            st.markdown(f"### 🔴 {comp_data['상품명']}")
+            st.metric(
+                "총점",
+                f"{score_color(comp_score['총점'])} {comp_score['총점']}점 / 100점",
+            )
+
+        # ── 항목별 점수 비교 바 ───────────────────────────────
+        st.divider()
+        st.markdown("#### 📋 항목별 점수 비교")
+
+        ITEMS = [
+            ("리뷰",  30, "리뷰수",  "개"),
+            ("평점",  20, "평점",    "점"),
+            ("찜",    20, "찜수",    "개"),
+            ("판매량",20, "판매량",  "개"),
+            ("이미지",10, "이미지수","개"),
+        ]
+
+        for label, max_score, data_key, unit in ITEMS:
+            my_s    = my_score[label]
+            comp_s  = comp_score[label]
+            my_val   = my_data.get(data_key, 0)
+            comp_val = comp_data.get(data_key, 0)
+
+            # 어느 쪽이 부족한지 표시
+            if my_s < comp_s:
+                gap_msg = f"⚠️ **{label}** 부족 ({my_s}점 vs {comp_s}점) — {comp_val - my_val:,}{unit} 차이"
+            elif my_s > comp_s:
+                gap_msg = f"✅ **{label}** 우위 ({my_s}점 vs {comp_s}점)"
+            else:
+                gap_msg = f"➖ **{label}** 동점 ({my_s}점)"
+
+            st.markdown(gap_msg)
+
+            bar_col1, bar_col2 = st.columns(2)
+            with bar_col1:
+                st.progress(my_s / max_score)
+                st.caption(f"🔵 내 상품: {my_val:,}{unit} → {my_s}/{max_score}점")
+            with bar_col2:
+                st.progress(comp_s / max_score)
+                st.caption(f"🔴 경쟁 상품: {comp_val:,}{unit} → {comp_s}/{max_score}점")
+
+        # ── 원본 수집 데이터 ──────────────────────────────────
+        st.divider()
+        with st.expander("🔍 원본 수집 데이터 확인"):
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown("**🔵 내 상품**")
+                st.json({k: v for k, v in my_data.items() if k != "url"})
+            with d2:
+                st.markdown("**🔴 경쟁 상품**")
+                st.json({k: v for k, v in comp_data.items() if k != "url"})
+
+        # ── 개선 제안 ────────────────────────────────────────
+        st.divider()
+        st.markdown("#### 💡 개선 제안")
+
+        suggestions = []
+        for label, max_score, data_key, unit in ITEMS:
+            my_s   = my_score[label]
+            comp_s = comp_score[label]
+            if my_s < comp_s:
+                diff = comp_data.get(data_key, 0) - my_data.get(data_key, 0)
+                if label == "리뷰":
+                    suggestions.append(f"📝 리뷰가 **{diff:,}개** 부족합니다. 구매자 리뷰 이벤트를 진행해보세요.")
+                elif label == "평점":
+                    suggestions.append(f"⭐ 평점이 낮습니다. 상품 품질 및 CS 응대를 점검해보세요.")
+                elif label == "찜":
+                    suggestions.append(f"❤️ 찜이 **{diff:,}개** 부족합니다. 찜 이벤트나 SNS 홍보를 고려해보세요.")
+                elif label == "판매량":
+                    suggestions.append(f"🛒 판매량이 부족합니다. 초기 판매를 늘리기 위해 할인 쿠폰 발행을 고려해보세요.")
+                elif label == "이미지":
+                    suggestions.append(f"🖼️ 상품 이미지가 부족합니다. 다양한 각도의 이미지를 추가해보세요.")
+
+        if suggestions:
+            for s in suggestions:
+                st.markdown(s)
+        else:
+            st.success("🎉 모든 항목에서 경쟁 상품 이상입니다!")

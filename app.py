@@ -16,7 +16,6 @@ from bs4 import BeautifulSoup
 CUSTOMER_ID = "1166309"
 API_KEY = "0100000000ed631c21265bcd5054bf3b1be463722f0b7ff9b796fe9002773230721f0a56fc"
 SECRET_KEY = "AQAAAADtYxwhJlvNUFS/OxvkY3IvUr3tb0gFwAHJxLYqDHP+7A=="
-
 CLIENT_ID = "H1DS09bkm8JUMQ52NGCW"
 CLIENT_SECRET = "eNZ8Mx9hU0"
 
@@ -37,26 +36,6 @@ def get_base_keywords(seed_keyword):
     params = {"hintKeywords": seed_keyword, "showDetail": 1}
     resp = requests.get(base_url + path, params=params, headers=headers)
     return resp.json().get('keywordList', []) if resp.status_code == 200 else []
-
-def get_datalab_analysis(keyword):
-    url = "https://openapi.naver.com/v1/datalab/search"
-    headers = {"X-Naver-Client-Id": CLIENT_ID, "X-Naver-Client-Secret": CLIENT_SECRET, "Content-Type": "application/json"}
-    
-    end_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-    
-    body = {
-        "startDate": start_date, "endDate": end_date, "timeUnit": "month",
-        "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
-    }
-    
-    # 예외 처리를 추가하여 권한이 없더라도 에러가 나지 않도록 방어
-    try:
-        res_gender = requests.post(url.replace("search", "share/gender"), headers=headers, json=body).json()
-        res_age = requests.post(url.replace("search", "share/age"), headers=headers, json=body).json()
-        return res_gender, res_age
-    except:
-        return {}, {}
 
 # ==========================================
 # [분석 및 크롤링 로직]
@@ -149,44 +128,29 @@ def analyze_top_blogs(target_keyword, total_vol):
             "title": int(metrics["title"]/len(items)), "visitors": expected_daily}
 
 # ==========================================
-# [시각화 컴포넌트]
+# [기기별 사용자 비율 컴포넌트]
 # ==========================================
-def render_user_analysis(keyword):
-    g_data, a_data = get_datalab_analysis(keyword)
+def render_device_ratio(keyword_list, seed_keyword):
+    target_data = next((item for item in keyword_list if item['relKeyword'].replace(" ", "") == seed_keyword.replace(" ", "")), None)
     
-    # 데이터랩 권한이나 데이터가 없을 때를 대비한 방어 코드
-    if 'results' in g_data and g_data['results']:
-        st.markdown(f"#### 📊 '{keyword}' 검색 사용자 심층 분석")
-        c1, c2 = st.columns([1, 2])
+    if target_data:
+        pc_v = target_data['monthlyPcQcCnt'] if isinstance(target_data['monthlyPcQcCnt'], int) else 0
+        mo_v = target_data['monthlyMobileQcCnt'] if isinstance(target_data['monthlyMobileQcCnt'], int) else 0
+        tot_v = pc_v + mo_v
         
-        with c1:
-            g_res = g_data['results'][0].get('data', [])
-            if g_res:
-                f_ratio = next((x['share'] for x in g_res if x.get('group') == 'f'), 50)
-                m_ratio = 100 - f_ratio
-                st.write("**성별 비중**")
-                st.markdown(f"""
-                <div style="background:#eee; border-radius:15px; height:25px; display:flex; overflow:hidden;">
-                    <div style="width:{f_ratio}%; background:#ff4b4b; color:white; text-align:center; font-size:12px; line-height:25px;">여성 {f_ratio:.1f}%</div>
-                    <div style="width:{m_ratio}%; background:#1c83e1; color:white; text-align:center; font-size:12px; line-height:25px;">남성 {m_ratio:.1f}%</div>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.info("성별 데이터가 충분하지 않습니다.")
-
-        with c2:
-            a_res = a_data.get('results', [{}])[0].get('data', [])
-            if a_res:
-                age_df = pd.DataFrame(a_res).groupby('group')['share'].mean().reset_index()
-                age_df.columns = ['연령대', '비중']
-                age_df['연령대'] = age_df['연령대'].map({'10':'10대','20':'20대','30':'30대','40':'40대','50':'50대','60':'60대+'})
-                st.write("**연령별 분포**")
-                st.bar_chart(age_df.set_index('연령대'), height=150)
-            else:
-                st.info("연령 데이터가 충분하지 않습니다.")
-        st.divider()
-    else:
-        st.warning("⚠️ 네이버 데이터랩 API 권한이 없거나, 검색량이 너무 적어 사용자 분석 지표를 불러올 수 없습니다.")
+        if tot_v > 0:
+            pc_percent = int((pc_v / tot_v) * 100)
+            mo_percent = 100 - pc_percent
+            
+            st.markdown(f"#### 📱 '{seed_keyword}' 기기별 검색 사용자 비율")
+            st.markdown(f"""
+            <div style="display: flex; height: 35px; border-radius: 8px; overflow: hidden; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <div style="width: {mo_percent}%; background-color: #2ECC71; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">모바일 {mo_percent}%</div>
+                <div style="width: {pc_percent}%; background-color: #E0E0E0; display: flex; align-items: center; justify-content: center; color: #333; font-weight: bold; font-size: 14px;">PC {pc_percent}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.caption(f"* 모바일 검색량: {mo_v:,}건 / PC 검색량: {pc_v:,}건 (최근 1개월 기준)")
+            st.divider()
 
 # ==========================================
 # [Main UI]
@@ -205,9 +169,11 @@ with tab1:
     s_keyword = st.text_input("쇼핑 키워드:", key="s_in", placeholder="예: 차량용방향제")
     if st.button("분석 시작", key="s_bt"):
         if s_keyword.strip():
-            render_user_analysis(s_keyword)
-            
             raw_keyword_list = get_base_keywords(s_keyword)
+            
+            if raw_keyword_list:
+                render_device_ratio(raw_keyword_list, s_keyword)
+                
             original_count = len(raw_keyword_list)
             keyword_list = [item for item in raw_keyword_list if not any(b_word in item['relKeyword'] for b_word in blacklist)]
             total_count = len(keyword_list)
@@ -239,9 +205,11 @@ with tab2:
     b_keyword = st.text_input("블로그 키워드:", key="b_in", placeholder="예: 세차장 창업")
     if st.button("분석 시작", key="b_bt"):
         if b_keyword.strip():
-            render_user_analysis(b_keyword)
-            
             raw_keyword_list = get_base_keywords(b_keyword)
+            
+            if raw_keyword_list:
+                render_device_ratio(raw_keyword_list, b_keyword)
+                
             original_count = len(raw_keyword_list)
             keyword_list = [item for item in raw_keyword_list if not any(b_word in item['relKeyword'] for b_word in blacklist)]
             total_count = len(keyword_list)

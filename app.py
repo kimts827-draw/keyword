@@ -11,11 +11,12 @@ import concurrent.futures
 from bs4 import BeautifulSoup
 
 # ==========================================
-# [API 키 세팅] - 본인의 키로 변경 필수
+# [API 키 세팅] - 본인의 실제 키로 반드시 변경하세요!
 # ==========================================
 CUSTOMER_ID = "1166309"
 API_KEY = "0100000000ed631c21265bcd5054bf3b1be463722f0b7ff9b796fe9002773230721f0a56fc"
 SECRET_KEY = "AQAAAADtYxwhJlvNUFS/OxvkY3IvUr3tb0gFwAHJxLYqDHP+7A=="
+
 CLIENT_ID = "H1DS09bkm8JUMQ52NGCW"
 CLIENT_SECRET = "eNZ8Mx9hU0"
 
@@ -34,8 +35,16 @@ def get_base_keywords(seed_keyword):
     signature = generate_signature(timestamp, "GET", path, SECRET_KEY)
     headers = {"X-Timestamp": timestamp, "X-API-KEY": API_KEY, "X-Customer": str(CUSTOMER_ID), "X-Signature": signature}
     params = {"hintKeywords": seed_keyword, "showDetail": 1}
+    
     resp = requests.get(base_url + path, params=params, headers=headers)
-    return resp.json().get('keywordList', []) if resp.status_code == 200 else []
+    
+    # [수정됨] API 통신 실패 시 침묵하지 않고 명확한 에러 메시지 출력
+    if resp.status_code != 200:
+        st.error(f"🚨 검색광고 API 연동 실패 (에러코드: {resp.status_code})")
+        st.info("해결방법: 코드 상단의 CUSTOMER_ID, API_KEY, SECRET_KEY가 정확한지 확인하세요.")
+        return None
+        
+    return resp.json().get('keywordList', [])
 
 # ==========================================
 # [분석 및 크롤링 로직 (황금 등급 추가)]
@@ -69,7 +78,6 @@ def fetch_shop_data(item):
     elif total_vol > 100 and (product_count / total_vol) < 0.1: keyword_type = "블로그용 (낮은 상품비율)"
     else: keyword_type = "쇼핑용"
 
-    # [신규 추가] 황금 키워드 등급 로직
     grade = "일반"
     if keyword_type == "쇼핑용":
         if total_vol >= 500 and competition <= 1.0:
@@ -96,7 +104,6 @@ def fetch_blog_data(item):
     saturation = round(blog_total / total_vol, 2) if total_vol > 0 else 0
     opportunity = round((total_vol / (blog_total + 1)) * 100, 2)
 
-    # [신규 추가] 블로그 황금 키워드 로직
     grade = "일반"
     if total_vol >= 500 and saturation <= 2.0:
         grade = "🥇 황금"
@@ -192,8 +199,15 @@ with tab1:
         if s_keyword.strip():
             raw_keyword_list = get_base_keywords(s_keyword)
             
-            if raw_keyword_list:
-                render_device_ratio(raw_keyword_list, s_keyword)
+            # [수정됨] API 실패(None 반환) 시 로직 중단
+            if raw_keyword_list is None:
+                st.stop()
+                
+            if len(raw_keyword_list) == 0:
+                st.warning("해당 키워드에 대한 연관 검색어가 없습니다.")
+                st.stop()
+            
+            render_device_ratio(raw_keyword_list, s_keyword)
                 
             original_count = len(raw_keyword_list)
             keyword_list = [item for item in raw_keyword_list if not any(b_word in item['relKeyword'] for b_word in blacklist)]
@@ -216,7 +230,6 @@ with tab1:
                 status_text.text("✅ 수집 완료! '키워드 등급' 컬럼에서 황금 키워드를 찾아보세요.")
                 df_shop = pd.DataFrame(results)
                 
-                # 황금 키워드가 눈에 띄도록 정렬 기능 지원 데이터프레임 출력
                 st.dataframe(df_shop, use_container_width=True)
                 
                 buffer = io.BytesIO()
@@ -230,8 +243,15 @@ with tab2:
         if b_keyword.strip():
             raw_keyword_list = get_base_keywords(b_keyword)
             
-            if raw_keyword_list:
-                render_device_ratio(raw_keyword_list, b_keyword)
+            # [수정됨] API 실패(None 반환) 시 로직 중단
+            if raw_keyword_list is None:
+                st.stop()
+                
+            if len(raw_keyword_list) == 0:
+                st.warning("해당 키워드에 대한 연관 검색어가 없습니다.")
+                st.stop()
+            
+            render_device_ratio(raw_keyword_list, b_keyword)
                 
             original_count = len(raw_keyword_list)
             keyword_list = [item for item in raw_keyword_list if not any(b_word in item['relKeyword'] for b_word in blacklist)]
@@ -265,6 +285,11 @@ with tab3:
     g_keyword = st.text_input("타겟 키워드 입력:", placeholder="예: 자동차 방향제 추천")
     if st.button("가이드 생성"):
         kw_data = get_base_keywords(g_keyword)
+        
+        # [수정됨] API 실패(None 반환) 시 로직 중단
+        if kw_data is None:
+            st.stop()
+            
         target = next((item for item in kw_data if item['relKeyword'].replace(" ", "") == g_keyword.replace(" ", "")), None)
         
         if target:
